@@ -116,16 +116,19 @@ app.get('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Bir sinf guruhining barcha testlarini olish (grade bo'yicha, masalan "7" uchun 7-A, 7-B)
+// Bir sinf guruhining barcha testlarini olish (grade bo'yicha yoki o'sha maxsus sinfga tegishli)
 app.get('/api/grade/:grade/tests', async (req, res) => {
   try {
-    const grade = req.params.grade;
+    const fullClassId = req.params.grade; // Masalan: "2-A"
+    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "2"
+    
+    // Ham aynan shu sinfga atalgan testlarni, ham umumiy shu parallel uchun (masalan "2-%") yuklangan testlarni olamiz
     const result = await pool.query(
-      `SELECT t.* FROM tests t 
-       JOIN classes c ON t.class_id = c.id 
-       WHERE c.id LIKE $1 
+      `SELECT DISTINCT t.id, t.class_id, t.question, t.correct_answer, t.options 
+       FROM tests t 
+       WHERE t.class_id = $1 OR t.class_id LIKE $2
        ORDER BY RANDOM()`,
-      [grade + '-%']
+      [fullClassId, gradeDigit + '-%']
     );
     res.json(result.rows);
   } catch (err) {
@@ -133,20 +136,28 @@ app.get('/api/grade/:grade/tests', async (req, res) => {
   }
 });
 
-// Yangi savol qo'shish
+// Yangi savol qo'shish (Bitta yoki bir nechta sinfga ommaviy yozishni qo'llaydi)
 app.post('/api/classes/:id/tests', async (req, res) => {
-  const { question, correct_answer, wrong1, wrong2 } = req.body;
+  const { question, correct_answer, wrong1, wrong2, targetClasses } = req.body;
   if (!question || !correct_answer) return res.status(400).json({ error: 'Savol va to\'g\'ri javob kerak' });
   
   const options = JSON.stringify([correct_answer, wrong1 || '', wrong2 || '']);
   
+  // Agar targetClasses massivi berilgan bo'lsa, o'shani ishlatamiz, aks holda faqat URL'dagi sinf ID si
+  const classesToInsert = targetClasses && targetClasses.length > 0 ? targetClasses : [req.params.id];
+  
   try {
-    const result = await pool.query(
-      'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4) RETURNING *',
-      [req.params.id, question, correct_answer, options]
-    );
-    res.json(result.rows[0]);
+    const insertedRows = [];
+    for (const cId of classesToInsert) {
+      const result = await pool.query(
+        'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4) RETURNING *',
+        [cId, question, correct_answer, options]
+      );
+      insertedRows.push(result.rows[0]);
+    }
+    res.json(insertedRows[0]);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
   }
 });
@@ -168,14 +179,14 @@ app.delete('/api/tests/:id', async (req, res) => {
 // Barcha natijalarni olish
 app.get('/api/results', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM results ORDER BY created_at DESC');
+    const result = await pool.query('SELECT * FROM results ORDER BY score DESC, created_at DESC');
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: 'Server xatosi' });
   }
 });
 
-// Sinf natijalarini olish
+// Sinf natijalarini olish (Ball bo'yicha yuqoridan pastga, saralangan)
 app.get('/api/classes/:id/results', async (req, res) => {
   try {
     const result = await pool.query(
