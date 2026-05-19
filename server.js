@@ -204,13 +204,10 @@ app.post('/api/results', async (req, res) => {
   const { class_id, team_name, student_name, score, total, time_taken } = req.body;
   if (!class_id || !student_name) return res.status(400).json({ error: "Ma'lumot yetarli emas" });
   
-  // Agarda frontend'dan team_name kelmasa default "Yakka" saqlaymiz, bazada NOT NULL cheklovi borligi uchun
-  const finalTeamName = team_name || "Yakka";
-
   try {
     const result = await pool.query(
       'INSERT INTO results (class_id, team_name, student_name, score, total, time_taken) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [class_id, finalTeamName, student_name, score, total, time_taken]
+      [class_id, team_name || 'Yakka', student_name, score, total, time_taken]
     );
     res.json(result.rows[0]);
   } catch (err) {
