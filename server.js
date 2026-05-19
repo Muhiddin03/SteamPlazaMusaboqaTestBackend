@@ -116,34 +116,36 @@ app.get('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Bir sinf guruhining barcha testlarini olish (grade bo'yicha yoki o'sha maxsus sinfga tegishli)
+// Bir sinf guruhining barcha testlarini olish (Tuzatilgan qismi 🛠️)
 app.get('/api/grade/:grade/tests', async (req, res) => {
   try {
-    const fullClassId = req.params.grade; // Masalan: "2-A"
-    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "2"
-    
-    // Ham aynan shu sinfga atalgan testlarni, ham umumiy shu parallel uchun (masalan "2-%") yuklangan testlarni olamiz
+    const fullClassId = req.params.grade; // Masalan: "1-g" yoki "2-A"
+    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "1" yoki "2"
+    const parallelPattern = gradeDigit + '-%'; // "1-%" ko'rinishidagi qidiruv andozasi
+
+    // SQL so'rovni PostgreSQL-ga mos va xatosiz ko'rinishga keltirdik
     const result = await pool.query(
-      `SELECT DISTINCT t.id, t.class_id, t.question, t.correct_answer, t.options 
-       FROM tests t 
-       WHERE t.class_id = $1 OR t.class_id LIKE $2
-       ORDER BY RANDOM()`,
-      [fullClassId, gradeDigit + '-%']
+      `SELECT id, class_id, question, correct_answer, options 
+       FROM tests 
+       WHERE class_id = $1 OR class_id LIKE $2`,
+      [fullClassId, parallelPattern]
     );
-    res.json(result.rows);
+    
+    // Savollarni o'quvchiga har safar har xil tartibda (random) chiqarish
+    const shuffledTests = result.rows.sort(() => Math.random() - 0.5);
+    res.json(shuffledTests);
   } catch (err) {
-    res.status(500).json({ error: 'Server xatosi' });
+    console.error("❌ /api/grade/:grade/tests ichida xatolik:", err);
+    res.status(500).json({ error: 'Server ichki xatosi: ' + err.message });
   }
 });
 
-// Yangi savol qo'shish (Bitta yoki bir nechta sinfga ommaviy yozishni qo'llaydi)
+// Yangi savol qo'shish
 app.post('/api/classes/:id/tests', async (req, res) => {
   const { question, correct_answer, wrong1, wrong2, targetClasses } = req.body;
   if (!question || !correct_answer) return res.status(400).json({ error: 'Savol va to\'g\'ri javob kerak' });
   
   const options = JSON.stringify([correct_answer, wrong1 || '', wrong2 || '']);
-  
-  // Agar targetClasses massivi berilgan bo'lsa, o'shani ishlatamiz, aks holda faqat URL'dagi sinf ID si
   const classesToInsert = targetClasses && targetClasses.length > 0 ? targetClasses : [req.params.id];
   
   try {
@@ -186,7 +188,7 @@ app.get('/api/results', async (req, res) => {
   }
 });
 
-// Sinf natijalarini olish (Ball bo'yicha yuqoridan pastga, saralangan)
+// Sinf natijalari
 app.get('/api/classes/:id/results', async (req, res) => {
   try {
     const result = await pool.query(
