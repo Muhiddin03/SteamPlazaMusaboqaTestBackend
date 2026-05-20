@@ -20,7 +20,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ─── DATABASE INIT (Jadvallar yaratish) ───────────────────────────────────────
+// ─── DATABASE INIT ────────────────────────────────────────────────────────────
 async function initDB() {
   const client = await pool.connect();
   try {
@@ -103,11 +103,11 @@ app.delete('/api/classes/:id', async (req, res) => {
 // TESTS (SAVOLLAR) API
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Sinf savollarini olish
+// Sinf savollarini olish (faqat shu sinf uchun - aralashtirilgan)
 app.get('/api/classes/:id/tests', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT * FROM tests WHERE class_id = $1 ORDER BY id',
+      'SELECT * FROM tests WHERE class_id = $1 ORDER BY RANDOM()',
       [req.params.id]
     );
     res.json(result.rows);
@@ -116,41 +116,14 @@ app.get('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Bir sinf guruhining barcha testlarini olish (O'quvchilar uchun)
-app.get('/api/grade/:grade/tests', async (req, res) => {
-  try {
-    const fullClassId = req.params.grade; // Masalan: "2-A" yoki "10-B"
-    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "2" yoki "10"
-    
-    // LIKE '2-%' sharti '20-%' ga ham mos tushmasligi uchun aniqroq andoza
-    const parallelPattern = gradeDigit + '-%'; 
-
-    // SQL so'rovida xatolik bartaraf etildi
-    const result = await pool.query(
-      `SELECT id, class_id, question, correct_answer, options 
-       FROM tests 
-       WHERE class_id = $1 
-          OR (class_id LIKE $2 AND SPLIT_PART(class_id, '-', 1) = $3)`,
-      [fullClassId, parallelPattern, gradeDigit]
-    );
-    
-    // Savollarni o'quvchiga har safar har xil tartibda (random) chiqarish
-    const shuffledTests = result.rows.sort(() => Math.random() - 0.5);
-    res.json(shuffledTests);
-  } catch (err) {
-    console.error("❌ /api/grade/:grade/tests ichida xatolik:", err);
-    res.status(500).json({ error: 'Server ichki xatosi: ' + err.message });
-  }
-});
-
-// Yangi savol qo'shish
+// Yangi savol qo'shish (bir yoki bir nechta sinflarga)
 app.post('/api/classes/:id/tests', async (req, res) => {
   const { question, correct_answer, wrong1, wrong2, targetClasses } = req.body;
-  if (!question || !correct_answer) return res.status(400).json({ error: 'Savol va to\'g\'ri javob kerak' });
-  
+  if (!question || !correct_answer) return res.status(400).json({ error: "Savol va to'g'ri javob kerak" });
+
   const options = JSON.stringify([correct_answer, wrong1 || '', wrong2 || '']);
-  const classesToInsert = targetClasses && targetClasses.length > 0 ? targetClasses : [req.params.id];
-  
+  const classesToInsert = (targetClasses && targetClasses.length > 0) ? targetClasses : [req.params.id];
+
   try {
     const insertedRows = [];
     for (const cId of classesToInsert) {
@@ -167,27 +140,31 @@ app.post('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Savol o'chirish
-app.delete('/api/tests/:id', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM tests WHERE id = $1', [req.params.id]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Server xatosi' });
-  }
-});
-
-// Savolni tahrirlash
+// Savol tahrirlash (yangi endpoint)
 app.put('/api/tests/:id', async (req, res) => {
   const { question, correct_answer, wrong1, wrong2 } = req.body;
+  if (!question || !correct_answer) return res.status(400).json({ error: "Savol va to'g'ri javob kerak" });
+
   const options = JSON.stringify([correct_answer, wrong1 || '', wrong2 || '']);
-  
+
   try {
     const result = await pool.query(
       'UPDATE tests SET question = $1, correct_answer = $2, options = $3 WHERE id = $4 RETURNING *',
       [question, correct_answer, options, req.params.id]
     );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Savol topilmadi' });
     res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server xatosi' });
+  }
+});
+
+// Savol o'chirish
+app.delete('/api/tests/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM tests WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Server xatosi' });
   }
@@ -224,7 +201,7 @@ app.get('/api/classes/:id/results', async (req, res) => {
 app.post('/api/results', async (req, res) => {
   const { class_id, team_name, student_name, score, total, time_taken } = req.body;
   if (!class_id || !team_name || !student_name) return res.status(400).json({ error: "Ma'lumot yetarli emas" });
-  
+
   try {
     const result = await pool.query(
       'INSERT INTO results (class_id, team_name, student_name, score, total, time_taken) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
