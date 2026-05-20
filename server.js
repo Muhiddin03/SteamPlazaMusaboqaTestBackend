@@ -51,7 +51,7 @@ async function initDB() {
       );
     `);
     console.log('✅ Database tables ready');
-  } finally {
+  } fill/y {
     client.release();
   }
 }
@@ -103,17 +103,6 @@ app.delete('/api/classes/:id', async (req, res) => {
 // TESTS (SAVOLLAR) API
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Bazadagi barcha testlarni olish (Yangi qo'shilgan qism 🛠️)
-app.get('/api/tests', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM tests ORDER BY class_id ASC, id ASC');
-    res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server xatosi' });
-  }
-});
-
 // Sinf savollarini olish
 app.get('/api/classes/:id/tests', async (req, res) => {
   try {
@@ -127,13 +116,18 @@ app.get('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Bir sinf guruhining barcha testlarini olish (Parallel tizim uchun)
+// Bir sinf guruhining barcha testlarini olish (Tuzatilgan qismi 🛠️)
 app.get('/api/grade/:grade/tests', async (req, res) => {
   try {
-    const fullClassId = req.params.grade; 
-    const gradeDigit = fullClassId.split('-')[0]; 
+    const fullClassId = req.params.grade; // Masalan: "2-A" yoki "10-B"
+    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "2" yoki "10"
+    
+    // LIKE '2-%' sharti '20-%' ga ham mos tushmasligi uchun aniqroq andoza tayyorlaymiz
     const parallelPattern = gradeDigit + '-%'; 
 
+    // SQL so'rovida xatolik bartaraf etildi: 
+    // Faqat tanlangan sinf id-siga teng bo'lgan yoki aynan o'sha parallel raqamli sinfga tegishli savollarni oladi.
+    // SUBSTRING orqali class_id'ning birinchi defisgacha bo'lgan qismi parallel raqamiga tengligi tekshiriladi.
     const result = await pool.query(
       `SELECT id, class_id, question, correct_answer, options 
        FROM tests 
@@ -142,6 +136,7 @@ app.get('/api/grade/:grade/tests', async (req, res) => {
       [fullClassId, parallelPattern, gradeDigit]
     );
     
+    // Savollarni o'quvchiga har safar har xil tartibda (random) chiqarish
     const shuffledTests = result.rows.sort(() => Math.random() - 0.5);
     res.json(shuffledTests);
   } catch (err) {
@@ -168,36 +163,6 @@ app.post('/api/classes/:id/tests', async (req, res) => {
       insertedRows.push(result.rows[0]);
     }
     res.json(insertedRows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server xatosi' });
-  }
-});
-
-// Mavjud savolni tahrirlash/yangilash (Yangi qo'shilgan qism 🛠️)
-app.put('/api/tests/:id', async (req, res) => {
-  const { id } = req.params;
-  const { class_id, question, correct_answer, wrong1, wrong2 } = req.body;
-  
-  if (!class_id || !question || !correct_answer) {
-    return res.status(400).json({ error: "Sinf, savol va to'g'ri javob majburiy!" });
-  }
-
-  const options = JSON.stringify([correct_answer, wrong1 || '', wrong2 || '']);
-
-  try {
-    const result = await pool.query(
-      `UPDATE tests 
-       SET class_id = $1, question = $2, correct_answer = $3, options = $4 
-       WHERE id = $5 RETURNING *`,
-      [class_id, question, correct_answer, options, id]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Savol topilmadi" });
-    }
-
-    res.json({ success: true, test: result.rows[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
