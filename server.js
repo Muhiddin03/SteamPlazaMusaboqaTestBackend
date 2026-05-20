@@ -51,7 +51,7 @@ async function initDB() {
       );
     `);
     console.log('✅ Database tables ready');
-  } finally {
+  } fill/y {
     client.release();
   }
 }
@@ -119,16 +119,21 @@ app.get('/api/classes/:id/tests', async (req, res) => {
 // Bir sinf guruhining barcha testlarini olish (Tuzatilgan qismi 🛠️)
 app.get('/api/grade/:grade/tests', async (req, res) => {
   try {
-    const fullClassId = req.params.grade; // Masalan: "1-g" yoki "2-A"
-    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "1" yoki "2"
-    const parallelPattern = gradeDigit + '-%'; // "1-%" ko'rinishidagi qidiruv andozasi
+    const fullClassId = req.params.grade; // Masalan: "2-A" yoki "10-B"
+    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "2" yoki "10"
+    
+    // LIKE '2-%' sharti '20-%' ga ham mos tushmasligi uchun aniqroq andoza tayyorlaymiz
+    const parallelPattern = gradeDigit + '-%'; 
 
-    // SQL so'rovni PostgreSQL-ga mos va xatosiz ko'rinishga keltirdik
+    // SQL so'rovida xatolik bartaraf etildi: 
+    // Faqat tanlangan sinf id-siga teng bo'lgan yoki aynan o'sha parallel raqamli sinfga tegishli savollarni oladi.
+    // SUBSTRING orqali class_id'ning birinchi defisgacha bo'lgan qismi parallel raqamiga tengligi tekshiriladi.
     const result = await pool.query(
       `SELECT id, class_id, question, correct_answer, options 
        FROM tests 
-       WHERE class_id = $1 OR class_id LIKE $2`,
-      [fullClassId, parallelPattern]
+       WHERE class_id = $1 
+          OR (class_id LIKE $2 AND SPLIT_PART(class_id, '-', 1) = $3)`,
+      [fullClassId, parallelPattern, gradeDigit]
     );
     
     // Savollarni o'quvchiga har safar har xil tartibda (random) chiqarish
