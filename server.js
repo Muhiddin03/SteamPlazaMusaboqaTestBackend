@@ -15,7 +15,7 @@ const pool = new Pool({
 // ─── MIDDLEWARE ────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
@@ -106,12 +106,30 @@ app.delete('/api/classes/:id', async (req, res) => {
 // Sinf savollarini olish (faqat shu sinf uchun - aralashtirilgan)
 app.get('/api/classes/:id/tests', async (req, res) => {
   try {
-    const result = await pool.query(
+    const classId = req.params.id;
+
+    // Avval shu sinfning o'z testlarini qilamiz
+    let result = await pool.query(
       'SELECT * FROM tests WHERE class_id = $1 ORDER BY RANDOM()',
-      [req.params.id]
+      [classId]
     );
+
+    // Agar bu sinfda test yo'q bo'lsa, parallel sinfdan oladi
+    // Masalan: 3-G da test yo'q => 3-A, 3-B, 3-C... dan birinchi topilganidan oladi
+    if (result.rows.length === 0) {
+      const grade = classId.split('-')[0]; // "3-G" => "3"
+      const parallelResult = await pool.query(
+        `SELECT * FROM tests 
+         WHERE SPLIT_PART(class_id, '-', 1) = $1 
+         ORDER BY RANDOM()`,
+        [grade]
+      );
+      result = parallelResult;
+    }
+
     res.json(result.rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
   }
 });
@@ -140,8 +158,8 @@ app.post('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Savol tahrirlash (yangi endpoint)
-app.put('/api/tests/:id', async (req, res) => {
+// Savol tahrirlash - PUT va PATCH ikkalasi ham ishlaydi
+async function updateTest(req, res) {
   const { question, correct_answer, wrong1, wrong2 } = req.body;
   if (!question || !correct_answer) return res.status(400).json({ error: "Savol va to'g'ri javob kerak" });
 
@@ -158,7 +176,9 @@ app.put('/api/tests/:id', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
   }
-});
+}
+app.put('/api/tests/:id', updateTest);
+app.patch('/api/tests/:id', updateTest);
 
 // Savol o'chirish
 app.delete('/api/tests/:id', async (req, res) => {
