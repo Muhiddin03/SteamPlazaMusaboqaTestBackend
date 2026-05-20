@@ -116,10 +116,10 @@ app.get('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Muammo tuzatildi: Faqat o'quvchi tanlagan aniq bitta sinfga tegishli savollarni qaytaradi 🛠️
+// Faqat o'quvchi tanlagan aniq bitta sinfga tegishli savollarni qaytaradi
 app.get('/api/grade/:grade/tests', async (req, res) => {
   try {
-    const fullClassId = req.params.grade; // Masalan: "2-A"
+    const fullClassId = req.params.grade;
     
     const result = await pool.query(
       `SELECT id, class_id, question, correct_answer, options 
@@ -128,7 +128,6 @@ app.get('/api/grade/:grade/tests', async (req, res) => {
       [fullClassId]
     );
     
-    // Savollarni o'quvchiga har safar har xil tartibda (random) chiqarish
     const shuffledTests = result.rows.sort(() => Math.random() - 0.5);
     res.json(shuffledTests);
   } catch (err) {
@@ -153,7 +152,7 @@ app.post('/api/classes/:id/tests', async (req, res) => {
       );
       return res.json(result.rows[0]);
     } else {
-      // Yangi savol qo'shish (Ommaviy yoki yakka)
+      // Yangi savol qo'shish
       const classesToInsert = targetClasses && targetClasses.length > 0 ? targetClasses : [req.params.id];
       const insertedRows = [];
       for (const cId of classesToInsert) {
