@@ -51,7 +51,7 @@ async function initDB() {
       );
     `);
     console.log('✅ Database tables ready');
-  } fill/y {
+  } finally {
     client.release();
   }
 }
@@ -116,24 +116,16 @@ app.get('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Bir sinf guruhining barcha testlarini olish (Tuzatilgan qismi 🛠️)
+// Muammo tuzatildi: Faqat o'quvchi tanlagan aniq bitta sinfga tegishli savollarni qaytaradi 🛠️
 app.get('/api/grade/:grade/tests', async (req, res) => {
   try {
-    const fullClassId = req.params.grade; // Masalan: "2-A" yoki "10-B"
-    const gradeDigit = fullClassId.split('-')[0]; // Masalan: "2" yoki "10"
+    const fullClassId = req.params.grade; // Masalan: "2-A"
     
-    // LIKE '2-%' sharti '20-%' ga ham mos tushmasligi uchun aniqroq andoza tayyorlaymiz
-    const parallelPattern = gradeDigit + '-%'; 
-
-    // SQL so'rovida xatolik bartaraf etildi: 
-    // Faqat tanlangan sinf id-siga teng bo'lgan yoki aynan o'sha parallel raqamli sinfga tegishli savollarni oladi.
-    // SUBSTRING orqali class_id'ning birinchi defisgacha bo'lgan qismi parallel raqamiga tengligi tekshiriladi.
     const result = await pool.query(
       `SELECT id, class_id, question, correct_answer, options 
        FROM tests 
-       WHERE class_id = $1 
-          OR (class_id LIKE $2 AND SPLIT_PART(class_id, '-', 1) = $3)`,
-      [fullClassId, parallelPattern, gradeDigit]
+       WHERE class_id = $1`,
+      [fullClassId]
     );
     
     // Savollarni o'quvchiga har safar har xil tartibda (random) chiqarish
@@ -145,24 +137,34 @@ app.get('/api/grade/:grade/tests', async (req, res) => {
   }
 });
 
-// Yangi savol qo'shish
+// Yangi savol qo'shish yoki mavjudini yangilash
 app.post('/api/classes/:id/tests', async (req, res) => {
-  const { question, correct_answer, wrong1, wrong2, targetClasses } = req.body;
+  const { id, question, correct_answer, wrong1, wrong2, targetClasses } = req.body;
   if (!question || !correct_answer) return res.status(400).json({ error: 'Savol va to\'g\'ri javob kerak' });
   
   const options = JSON.stringify([correct_answer, wrong1 || '', wrong2 || '']);
-  const classesToInsert = targetClasses && targetClasses.length > 0 ? targetClasses : [req.params.id];
   
   try {
-    const insertedRows = [];
-    for (const cId of classesToInsert) {
+    if (id) {
+      // Tahrirlash (Edit mode)
       const result = await pool.query(
-        'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4) RETURNING *',
-        [cId, question, correct_answer, options]
+        'UPDATE tests SET question = $1, correct_answer = $2, options = $3 WHERE id = $4 RETURNING *',
+        [question, correct_answer, options, id]
       );
-      insertedRows.push(result.rows[0]);
+      return res.json(result.rows[0]);
+    } else {
+      // Yangi savol qo'shish (Ommaviy yoki yakka)
+      const classesToInsert = targetClasses && targetClasses.length > 0 ? targetClasses : [req.params.id];
+      const insertedRows = [];
+      for (const cId of classesToInsert) {
+        const result = await pool.query(
+          'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4) RETURNING *',
+          [cId, question, correct_answer, options]
+        );
+        insertedRows.push(result.rows[0]);
+      }
+      return res.json(insertedRows[0]);
     }
-    res.json(insertedRows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
