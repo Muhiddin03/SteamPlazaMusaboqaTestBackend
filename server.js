@@ -320,10 +320,14 @@ app.post('/api/classes/:id/copy-to-parallel', async (req, res) => {
     }
 
     // Bir xil parallel (masalan '2') dagi barcha boshqa sinflar
-    const parallelClasses = await pool.query(
-      `SELECT id FROM classes WHERE SPLIT_PART(id, '-', 1) = $1 AND id != $2`,
-      [grade, sourceClassId]
-    );
+    // SPLIT_PART o'rniga JS da grade hisoblab, LIKE ishlatamiz
+    const allClasses = await pool.query('SELECT id FROM classes');
+    const parallelClassIds = allClasses.rows
+      .map(r => r.id)
+      .filter(id => id.split('-')[0] === grade && id !== sourceClassId);
+
+    // rows formatiga o'tkazamiz
+    const parallelClasses = { rows: parallelClassIds.map(id => ({ id })) };
 
     let totalAdded = 0;
     for (const cls of parallelClasses.rows) {
