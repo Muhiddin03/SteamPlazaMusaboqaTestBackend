@@ -339,9 +339,16 @@ app.post('/api/classes/:id/copy-to-parallel', async (req, res) => {
         );
         if (exists.rows.length > 0) continue;
 
+        // options JSONB array - to'g'ri JSON string sifatida uzatamiz
+        let optionsArr = test.options;
+        if (typeof optionsArr === 'string') {
+          try { optionsArr = JSON.parse(optionsArr); } catch(e) {}
+        }
+        // Array bo'lsa JSON stringify, aks holda xavfsiz stringify
+        const optionsStr = JSON.stringify(Array.isArray(optionsArr) ? optionsArr : [optionsArr]);
         await pool.query(
-          'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4)',
-          [cls.id, test.question, test.correct_answer, test.options]
+          'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4::jsonb)',
+          [cls.id, test.question, test.correct_answer, optionsStr]
         );
         totalAdded++;
       }
