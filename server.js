@@ -134,7 +134,7 @@ app.get('/api/classes/:id/tests', async (req, res) => {
   }
 });
 
-// Yangi savol qo'shish (bir yoki bir nechta sinflarga)
+// Yangi savol qo'shish (bir yoki bir nechta sinflarga, duplikat tekshiradi)
 app.post('/api/classes/:id/tests', async (req, res) => {
   const { question, correct_answer, wrong1, wrong2, targetClasses } = req.body;
   if (!question || !correct_answer) return res.status(400).json({ error: "Savol va to'g'ri javob kerak" });
@@ -145,13 +145,22 @@ app.post('/api/classes/:id/tests', async (req, res) => {
   try {
     const insertedRows = [];
     for (const cId of classesToInsert) {
+      // Duplikat tekshirish: bu sinfda xuddi shu savol allaqachon bormi?
+      const existing = await pool.query(
+        'SELECT id FROM tests WHERE class_id = $1 AND LOWER(question) = LOWER($2)',
+        [cId, question]
+      );
+      if (existing.rows.length > 0) {
+        // Bu sinfda bu savol bor, o'tkazib yuboramiz
+        continue;
+      }
       const result = await pool.query(
         'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4) RETURNING *',
         [cId, question, correct_answer, options]
       );
       insertedRows.push(result.rows[0]);
     }
-    res.json(insertedRows[0]);
+    res.json(insertedRows[0] || { success: true, skipped: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
@@ -179,6 +188,30 @@ async function updateTest(req, res) {
 }
 app.put('/api/tests/:id', updateTest);
 app.patch('/api/tests/:id', updateTest);
+
+// Bir sinfdagi ortiqcha (dublikat) savollarni tozalash
+// Faqat shu class_id dagi savollarni o'chiradi, boshqa sinflarga tegmaydi
+app.delete('/api/classes/:id/tests/trim', async (req, res) => {
+  const { keepCount } = req.body; // nechta qoldirish kerak
+  if (!keepCount || keepCount < 1) return res.status(400).json({ error: 'keepCount kerak' });
+
+  try {
+    // Shu sinfdagi savollarni id bo'yicha tartiblab, ortiqchalarini o'chiradi
+    const result = await pool.query(
+      `DELETE FROM tests 
+       WHERE class_id = $1 
+       AND id NOT IN (
+         SELECT id FROM tests WHERE class_id = $1 ORDER BY id LIMIT $2
+       )
+       RETURNING id`,
+      [req.params.id, keepCount]
+    );
+    res.json({ success: true, deleted: result.rows.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server xatosi' });
+  }
+});
 
 // Savol o'chirish
 app.delete('/api/tests/:id', async (req, res) => {
@@ -255,6 +288,31 @@ app.delete('/api/clear-all', async (req, res) => {
     await pool.query('DELETE FROM classes');
     res.json({ success: true });
   } catch (err) {
+    res.status(500).json({ error: 'Server xatosi' });
+  }
+});
+
+
+// ─── TAKRORIY SAVOLLARNI O'CHIRISH (DEDUP) ───────────────────────────────────
+// Bir sinfdagi takroriy savollarni qoldirib, birinchisini saqlab, qolganlarini o'chiradi
+app.delete('/api/classes/:id/dedup', async (req, res) => {
+  try {
+    const classId = req.params.id;
+    // Bir xil savol matni bo'lgan savollardan eng kichik id li birini qoldirib, qolganlarini o'chiradi
+    const result = await pool.query(
+      `DELETE FROM tests
+       WHERE class_id = $1
+         AND id NOT IN (
+           SELECT MIN(id) FROM tests
+           WHERE class_id = $1
+           GROUP BY question
+         )
+       RETURNING id`,
+      [classId]
+    );
+    res.json({ success: true, deleted: result.rowCount });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
   }
 });
