@@ -107,26 +107,10 @@ app.delete('/api/classes/:id', async (req, res) => {
 app.get('/api/classes/:id/tests', async (req, res) => {
   try {
     const classId = req.params.id;
-
-    // Avval shu sinfning o'z testlarini qilamiz
-    let result = await pool.query(
+    const result = await pool.query(
       'SELECT * FROM tests WHERE class_id = $1 ORDER BY RANDOM()',
       [classId]
     );
-
-    // Agar bu sinfda test yo'q bo'lsa, parallel sinfdan oladi
-    // Masalan: 3-G da test yo'q => 3-A, 3-B, 3-C... dan birinchi topilganidan oladi
-    if (result.rows.length === 0) {
-      const grade = classId.split('-')[0]; // "3-G" => "3"
-      const parallelResult = await pool.query(
-        `SELECT * FROM tests 
-         WHERE SPLIT_PART(class_id, '-', 1) = $1 
-         ORDER BY RANDOM()`,
-        [grade]
-      );
-      result = parallelResult;
-    }
-
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -311,6 +295,60 @@ app.delete('/api/classes/:id/dedup', async (req, res) => {
       [classId]
     );
     res.json({ success: true, deleted: result.rowCount });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server xatosi' });
+  }
+});
+
+
+// ─── BIR SINFDAN PARALLEL SINFLARGA TESTLARNI KO'PAYTIRISH ──────────────────
+// Masalan: 2-A dagi testlarni 2-B, 2-C, 2-D, 2-E ga ham qo'shadi (duplikat bo'lmagan)
+app.post('/api/classes/:id/copy-to-parallel', async (req, res) => {
+  try {
+    const sourceClassId = req.params.id;
+    const grade = sourceClassId.split('-')[0];
+
+    // Manba sinfdagi barcha testlar
+    const sourceTests = await pool.query(
+      'SELECT * FROM tests WHERE class_id = $1',
+      [sourceClassId]
+    );
+
+    if (sourceTests.rows.length === 0) {
+      return res.status(400).json({ error: "Bu sinfda test yo'q" });
+    }
+
+    // Bir xil parallel (masalan '2') dagi barcha boshqa sinflar
+    const parallelClasses = await pool.query(
+      `SELECT id FROM classes WHERE SPLIT_PART(id, '-', 1) = $1 AND id != $2`,
+      [grade, sourceClassId]
+    );
+
+    let totalAdded = 0;
+    for (const cls of parallelClasses.rows) {
+      for (const test of sourceTests.rows) {
+        // Duplikat tekshirish
+        const exists = await pool.query(
+          'SELECT id FROM tests WHERE class_id = $1 AND LOWER(question) = LOWER($2)',
+          [cls.id, test.question]
+        );
+        if (exists.rows.length > 0) continue;
+
+        await pool.query(
+          'INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4)',
+          [cls.id, test.question, test.correct_answer, test.options]
+        );
+        totalAdded++;
+      }
+    }
+
+    res.json({
+      success: true,
+      source: sourceClassId,
+      parallelClasses: parallelClasses.rows.map(r => r.id),
+      totalAdded
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server xatosi' });
