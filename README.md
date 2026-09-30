@@ -51,7 +51,13 @@ O'quvchi test yechayotganda tizim quyidagilarni kuzatadi va admin paneliga yozad
 - Ekranda o'quvchining ismi yozilgan suv belgisi turadi (skrinshot tarqatilsa, kimniki ekani ko'rinadi)
 - Matnni belgilash va nusxalash bloklangan
 - Bitta o'quvchi testni faqat bir marta topshiradi (admin natijani o'chirsa, qayta topshira oladi)
-- **Kamera nazorati** (ixtiyoriy): old kameradan har 20 soniyada va har qoidabuzarlikda surat olinadi, admin ularni ko'radi
+- **Kamera nazorati** (standart: yoqilgan, Sozlamalar'dan o'chirish mumkin): o'quvchi rozilik bergandan keyin old kamera yoqiladi
+  - Admin **Kuzatuv** bo'limida barcha faol o'quvchilarning kamera kadrlarini har 4 soniyada ko'rib turadi (kadrlar faqat server xotirasida, bazaga yozilmaydi)
+  - Har 30 soniyada va har qoidabuzarlikda bittadan surat bazaga saqlanadi — keyin natija tafsilotida ko'rinadi
+
+**O'quvchi oqimi:** sinf → ism familiya → taqiqlar haqida ogohlantirish oynasi → kamera roziligi → test. Javob bitta bosishda yuboriladi, savol va variantlar telefon ekraniga to'liq sig'adi.
+
+> 💡 **Tezlik:** har bir so'rov ~300 ms oladi, chunki Railway serveri uzoqda joylashgan. Railway → backend → Settings → **Region** ni `EU West (Amsterdam)` ga o'zgartirsangiz, O'zbekistondan javob ~2–3 barobar tezlashadi (Postgres'ni ham shu regionga ko'chiring).
 
 Admin panelidagi **Natijalar** bo'limi har 10 soniyada yangilanadi. Unda kim hozir yechayotgani, har bir o'quvchining xavf darajasi (Toza / Shubhali / Yuqori xavf), vaqt ko'rsatilgan nazorat jurnali, har bir savolga ketgan vaqt va kamera suratlari ko'rinadi. Admin testni istalgan payt to'xtata oladi.
 

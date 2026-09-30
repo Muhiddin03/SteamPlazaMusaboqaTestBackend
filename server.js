@@ -25,6 +25,11 @@ const ANSWER_GRACE_MS = 3000;          // tarmoq kechikishi uchun qo'shimcha vaq
 const VIOLATION_DEDUP_MS = 4000;       // bitta harakat bir necha hodisa chiqarsa, 1 marta sanaladi
 const ABANDON_AFTER_MIN = 5;           // shuncha daqiqa aloqa bo'lmasa test "tashlab ketilgan"
 const SNAPSHOT_MAX_BYTES = 150 * 1024;
+const SNAPSHOT_SAVE_MS = 30000;        // bazaga saqlanadigan surat oralig'i
+const LIVE_FRAME_TTL_MS = 60000;       // shundan eski jonli kadr ko'rsatilmaydi
+
+// attempt_id -> { buf, at } — jonli kuzatuv uchun oxirgi kamera kadri (faqat xotirada)
+const liveFrames = new Map();
 
 function fatal(msg) {
   console.error('❌ ' + msg);
@@ -251,7 +256,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   question_time_sec: 45,       // har bir savolga beriladigan vaqt
   max_violations: 3,           // shuncha qoidabuzarlikdan keyin test to'xtatiladi (0 = to'xtatilmaydi)
   questions_per_attempt: 0,    // har bir o'quvchiga nechta tasodifiy savol (0 = hammasi)
-  camera_mode: 'off',          // 'off' | 'required'
+  camera_mode: 'required',     // 'off' | 'required'
   share_grade_tests: false,    // true: 7-A, 7-B ... barcha 7-sinf savollari aralash beriladi
   show_score_to_student: true  // test oxirida o'quvchiga ball ko'rsatiladi
 });
@@ -273,9 +278,17 @@ function normalizeSettings(input, base) {
   };
 }
 
-async function getSettings(db = pool) {
-  const r = await db.query(`SELECT value FROM settings WHERE key = 'app'`);
-  return normalizeSettings(r.rows[0]?.value, DEFAULT_SETTINGS);
+// Sozlamalar xotirada saqlanadi — har bir javobda bazaga murojaat qilinmaydi
+let settingsCache = null;
+let settingsCachedAt = 0;
+const SETTINGS_TTL_MS = 30000;
+
+async function getSettings() {
+  if (settingsCache && Date.now() - settingsCachedAt < SETTINGS_TTL_MS) return settingsCache;
+  const r = await pool.query(`SELECT value FROM settings WHERE key = 'app'`);
+  settingsCache = normalizeSettings(r.rows[0]?.value, DEFAULT_SETTINGS);
+  settingsCachedAt = Date.now();
+  return settingsCache;
 }
 
 // ─── ADMIN AUTH ────────────────────────────────────────────────────────────────
@@ -382,19 +395,21 @@ async function finishAttempt(db, a, status) {
   a.finished_at = new Date();
   await db.query('UPDATE attempts SET status = $2, score = $3, total = $4, finished_at = $5 WHERE id = $1',
     [a.id, a.status, a.score, a.total, a.finished_at]);
+  liveFrames.delete(a.id);
 }
 
-// Vaqti o'tgan savollarni yopadi, o'chirilgan savollarni tashlab ketadi, oxirida testni yakunlaydi
+// Vaqti o'tgan savollarni yopadi, o'chirilgan savollarni tashlab ketadi, oxirida testni yakunlaydi.
+// Joriy savolni (bazadan o'qilgan qatorni) qaytaradi — qayta so'ralmasligi uchun.
 async function syncAttempt(db, a, s) {
-  if (a.status !== 'active') return;
+  if (a.status !== 'active') return null;
   const limitMs = s.question_time_sec * 1000;
   for (;;) {
     const ids = a.question_ids || [];
     if (a.current_index >= ids.length) {
       await finishAttempt(db, a, 'finished');
-      return;
+      return null;
     }
-    const { rows } = await db.query('SELECT id, question, correct_answer FROM tests WHERE id = $1', [ids[a.current_index]]);
+    const { rows } = await db.query('SELECT id, question, correct_answer, options FROM tests WHERE id = $1', [ids[a.current_index]]);
     if (!rows[0]) {
       ids.splice(a.current_index, 1);
       a.question_ids = ids;
@@ -402,7 +417,7 @@ async function syncAttempt(db, a, s) {
       continue;
     }
     const startedAt = new Date(a.question_started_at).getTime();
-    if (Date.now() - startedAt <= limitMs + ANSWER_GRACE_MS) return;
+    if (Date.now() - startedAt <= limitMs + ANSWER_GRACE_MS) return rows[0];
 
     await recordAnswer(db, a, rows[0], null, limitMs, true);
     a.current_index += 1;
@@ -413,7 +428,7 @@ async function syncAttempt(db, a, s) {
 }
 
 // O'quvchiga yuboriladigan holat. To'g'ri javob HECH QACHON yuborilmaydi.
-async function buildState(db, a, s) {
+async function buildState(db, a, s, current) {
   const state = {
     status: a.status,
     violations: a.violations,
@@ -424,8 +439,10 @@ async function buildState(db, a, s) {
     if (s.show_score_to_student) state.score = a.score;
     return state;
   }
-  const { rows } = await db.query('SELECT id, question, options FROM tests WHERE id = $1', [a.question_ids[a.current_index]]);
-  const t = rows[0];
+  const currentId = a.question_ids[a.current_index];
+  const t = current && current.id === currentId
+    ? current
+    : (await db.query('SELECT id, question, options FROM tests WHERE id = $1', [currentId])).rows[0];
   const limitMs = s.question_time_sec * 1000;
   const elapsed = Date.now() - new Date(a.question_started_at).getTime();
   state.question = {
@@ -490,7 +507,7 @@ const limiter = (windowMs, limit, error) => rateLimit({
   windowMs, limit, standardHeaders: 'draft-7', legacyHeaders: false, message: { error }
 });
 // Bir maktab/sinf bitta IP orqali chiqishi mumkin, shuning uchun umumiy limit keng
-app.use('/api/', limiter(60 * 1000, 1500, 'Juda ko\'p so\'rov. Biroz kuting.'));
+app.use('/api/', limiter(60 * 1000, 4000, 'Juda ko\'p so\'rov. Biroz kuting.'));
 const loginLimiter = limiter(15 * 60 * 1000, 10, 'Juda ko\'p urinish. 15 daqiqadan keyin qayta urinib ko\'ring.');
 const startLimiter = limiter(10 * 60 * 1000, 120, 'Juda ko\'p urinish. Biroz kuting.');
 
@@ -554,12 +571,12 @@ app.post('/api/attempt/start', startLimiter, asyncH(async (req, res) => {
 app.get('/api/attempt/state', asyncH(async (req, res) => {
   const s = await getSettings();
   const state = await withAttempt(req, async (db, a) => {
-    await syncAttempt(db, a, s);
+    const current = await syncAttempt(db, a, s);
     if (a.status === 'active') {
       if (req.query.resume === '1') await logEvent(db, a, 'reload', 'Sahifa qayta ochildi', false);
       await db.query('UPDATE attempts SET last_seen_at = $2 WHERE id = $1', [a.id, new Date()]);
     }
-    return buildState(db, a, s);
+    return buildState(db, a, s, current);
   });
   res.json(state);
 }));
@@ -570,10 +587,9 @@ app.post('/api/attempt/answer', asyncH(async (req, res) => {
   const answer = req.body?.answer == null ? null : String(req.body.answer).slice(0, 1000);
 
   const state = await withAttempt(req, async (db, a) => {
-    await syncAttempt(db, a, s);
-    if (a.status === 'active' && a.question_ids[a.current_index] === questionId) {
-      const { rows } = await db.query('SELECT id, question, correct_answer, options FROM tests WHERE id = $1', [questionId]);
-      const t = rows[0];
+    let current = await syncAttempt(db, a, s);
+    if (a.status === 'active' && current && current.id === questionId) {
+      const t = current;
       if (answer !== null && !uniqueOptions(t.options).includes(answer)) {
         throw new HttpError(400, 'Noto\'g\'ri javob varianti');
       }
@@ -590,9 +606,9 @@ app.post('/api/attempt/answer', asyncH(async (req, res) => {
       a.question_started_at = new Date();
       await db.query('UPDATE attempts SET current_index = $2, question_started_at = $3, last_seen_at = $3 WHERE id = $1',
         [a.id, a.current_index, a.question_started_at]);
-      await syncAttempt(db, a, s);
+      current = await syncAttempt(db, a, s);
     }
-    return buildState(db, a, s);
+    return buildState(db, a, s, current);
   });
   res.json(state);
 }));
@@ -649,14 +665,28 @@ app.post('/api/attempt/snapshot', asyncH(async (req, res) => {
   if (buf.length < 500 || buf.length > SNAPSHOT_MAX_BYTES || buf[0] !== 0xFF || buf[1] !== 0xD8) {
     throw new HttpError(400, 'Rasm yaroqsiz');
   }
-  const reason = cleanText(req.body?.reason, 40) || 'interval';
+  const reason = cleanText(req.body?.reason, 40) || 'live';
+  const token = req.get('x-attempt-token') || '';
+  if (!token || token.length > 100) throw new HttpError(401, 'Test sessiyasi topilmadi');
 
-  await withAttempt(req, async (db, a) => {
-    if (a.status !== 'active') return;
-    if (a.last_snapshot_at && Date.now() - new Date(a.last_snapshot_at) < 5000) return;
-    await db.query('INSERT INTO attempt_snapshots (attempt_id, image, reason) VALUES ($1, $2, $3)', [a.id, buf, reason]);
-    await db.query('UPDATE attempts SET last_snapshot_at = $2 WHERE id = $1', [a.id, new Date()]);
-  });
+  // Qulf (FOR UPDATE) ishlatilmaydi — kadrlar tez-tez keladi va javob berishni sekinlashtirmasligi kerak
+  const { rows } = await pool.query(
+    'SELECT id, status, last_snapshot_at FROM attempts WHERE token_hash = $1', [sha256(token)]);
+  const a = rows[0];
+  if (!a) throw new HttpError(404, 'Test sessiyasi topilmadi');
+  if (a.status !== 'active') return res.json({ ok: true, status: a.status });
+
+  // Jonli kuzatuv uchun oxirgi kadr faqat xotirada turadi (bazaga yozilmaydi)
+  liveFrames.set(a.id, { buf, at: Date.now() });
+
+  // Bazaga: har SNAPSHOT_SAVE_MS da bir marta yoki qoidabuzarlik/qaytish paytida
+  const since = a.last_snapshot_at ? Date.now() - new Date(a.last_snapshot_at) : Infinity;
+  const important = reason !== 'live';
+  if ((important && since > 5000) || since > SNAPSHOT_SAVE_MS) {
+    await pool.query('INSERT INTO attempt_snapshots (attempt_id, image, reason) VALUES ($1, $2, $3)',
+      [a.id, buf, important ? reason : 'interval']);
+    await pool.query('UPDATE attempts SET last_snapshot_at = $2 WHERE id = $1', [a.id, new Date()]);
+  }
   res.json({ ok: true });
 }));
 
@@ -945,6 +975,28 @@ app.delete('/api/admin/attempts/:id', asyncH(async (req, res) => {
   res.json({ success: true });
 }));
 
+// ─── Jonli kuzatuv ───
+app.get('/api/admin/live', asyncH(async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT a.id, a.class_id, a.student_name, a.current_index, cardinality(a.question_ids) AS question_count,
+           a.violations, a.camera, a.started_at, a.last_seen_at, a.last_violation_at,
+           (SELECT e.type FROM attempt_events e WHERE e.attempt_id = a.id AND e.is_violation
+             ORDER BY e.id DESC LIMIT 1) AS last_violation_type
+    FROM attempts a WHERE a.status = 'active'
+    ORDER BY a.class_id, a.student_name`);
+  const now = Date.now();
+  res.json(rows.map(r => {
+    const f = liveFrames.get(r.id);
+    return { ...r, frame_at: f && now - f.at < LIVE_FRAME_TTL_MS ? new Date(f.at) : null };
+  }));
+}));
+
+app.get('/api/admin/live/:id/frame', asyncH(async (req, res) => {
+  const f = liveFrames.get(parseId(req.params.id));
+  if (!f || Date.now() - f.at > LIVE_FRAME_TTL_MS) throw new HttpError(404, 'Kadr yo\'q');
+  res.set('Content-Type', 'image/jpeg').set('Cache-Control', 'private, no-store').send(f.buf);
+}));
+
 // ─── Sozlamalar ───
 app.get('/api/admin/settings', asyncH(async (req, res) => {
   res.json(await getSettings());
@@ -955,6 +1007,8 @@ app.put('/api/admin/settings', asyncH(async (req, res) => {
   await pool.query(`
     INSERT INTO settings (key, value) VALUES ('app', $1)
     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [JSON.stringify(next)]);
+  settingsCache = next;
+  settingsCachedAt = Date.now();
   res.json(next);
 }));
 
@@ -984,6 +1038,9 @@ app.use((err, req, res, next) => {
 
 // ─── TASHLAB KETILGAN TESTLARNI YOPISH ─────────────────────────────────────────
 async function sweepAbandoned() {
+  for (const [id, f] of liveFrames) {
+    if (Date.now() - f.at > LIVE_FRAME_TTL_MS) liveFrames.delete(id);
+  }
   const { rows } = await pool.query(
     `SELECT id FROM attempts WHERE status = 'active' AND last_seen_at < NOW() - make_interval(mins => $1)`,
     [ABANDON_AFTER_MIN]);
