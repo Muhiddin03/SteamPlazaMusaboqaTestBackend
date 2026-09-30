@@ -60,6 +60,15 @@ O'quvchi test yechayotganda tizim quyidagilarni kuzatadi va admin paneliga yozad
   - O'quvchi ekranida darhol qizil ogohlantirish chiqadi; adminda kartochka qizaradi, ovozli signal va bildirishnoma keladi
   - Boshida ~2.5 soniya o'quvchining odatiy holati o'rganiladi (kalibrovka), keyin shunga nisbatan o'lchanadi
 
+**Matematika testlari:** admin **Kuzatuv** yoki **Sozlamalar**da "Qog'ozda ishlash" ni yoqsa — pastga qarash va yozish harakati xavf hisoblanmaydi, yuz 12 soniyagacha ko'rinmasa kechiriladi. Bundan tashqari test ekranida har doim **✏️ Qoralama** bor — o'quvchi barmoq bilan misol ishlaydi (har savolda tozalanadi).
+
+**Natijalar va PDF:**
+- Natijalarni belgilab (yoki filtrdagi hammasini) **birdan o'chirish** — admin paroli bilan tasdiqlanadi
+- **O'quvchiga PDF** — o'quvchiga yuborish uchun shaffof varaqa: ball, foiz, baho (5 balli), har bir savol bo'yicha javobi va to'g'ri javob, nazorat qaydlari
+- **To'liq hisobot PDF** — admin uchun: yuqoridagilar + xavf darajasi, qurilma, kamera suratlari
+- Bir nechta o'quvchi tanlansa — bitta PDF: boshida reyting jadvali, keyin har bir o'quvchi alohida sahifada
+- **PDF** (reyting jadvali) va **TOP-3** — sinflar kesimida
+
 **O'quvchi oqimi:** sinf → ism familiya → taqiqlar haqida ogohlantirish oynasi → kamera roziligi → test. Javob bitta bosishda yuboriladi, savol va variantlar telefon ekraniga to'liq sig'adi.
 
 > 💡 **Tezlik:** har bir so'rov ~300 ms oladi, chunki Railway serveri uzoqda joylashgan. Railway → backend → Settings → **Region** ni `EU West (Amsterdam)` ga o'zgartirsangiz, O'zbekistondan javob ~2–3 barobar tezlashadi (Postgres'ni ham shu regionga ko'chiring).

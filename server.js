@@ -262,7 +262,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   questions_per_attempt: 0,    // har bir o'quvchiga nechta tasodifiy savol (0 = hammasi)
   camera_mode: 'required',     // 'off' | 'required'
   share_grade_tests: false,    // true: 7-A, 7-B ... barcha 7-sinf savollari aralash beriladi
-  show_score_to_student: true  // test oxirida o'quvchiga ball ko'rsatiladi
+  show_score_to_student: true, // test oxirida o'quvchiga ball ko'rsatiladi
+  allow_paper: false           // qog'ozda ishlashga ruxsat (matematika): pastga qarash xavf hisoblanmaydi
 });
 
 function normalizeSettings(input, base) {
@@ -278,7 +279,8 @@ function normalizeSettings(input, base) {
     questions_per_attempt: int('questions_per_attempt', 0, 500),
     camera_mode: ['off', 'required'].includes(src.camera_mode) ? src.camera_mode : base.camera_mode,
     share_grade_tests: bool('share_grade_tests'),
-    show_score_to_student: bool('show_score_to_student')
+    show_score_to_student: bool('show_score_to_student'),
+    allow_paper: bool('allow_paper')
   };
 }
 
@@ -538,7 +540,8 @@ app.get('/api/settings', asyncH(async (req, res) => {
   res.json({
     question_time_sec: s.question_time_sec,
     max_violations: s.max_violations,
-    camera_mode: s.camera_mode
+    camera_mode: s.camera_mode,
+    allow_paper: s.allow_paper
   });
 }));
 
@@ -984,6 +987,62 @@ app.post('/api/admin/attempts/:id/terminate', asyncH(async (req, res) => {
 app.delete('/api/admin/attempts/:id', asyncH(async (req, res) => {
   await pool.query('DELETE FROM attempts WHERE id = $1', [parseId(req.params.id)]);
   res.json({ success: true });
+}));
+
+function parseIdList(v, max) {
+  if (!Array.isArray(v) || !v.length) throw new HttpError(400, 'Hech narsa tanlanmagan');
+  if (v.length > max) throw new HttpError(400, `Bir martada ko'pi bilan ${max} ta`);
+  return [...new Set(v.map(parseId))];
+}
+
+// Bir nechta natijani birdan o'chirish (parol bilan tasdiqlanadi)
+app.post('/api/admin/attempts/bulk-delete', asyncH(async (req, res) => {
+  await verifyAdminPassword(req.admin.id, req.body?.password);
+  const ids = parseIdList(req.body?.ids, 5000);
+  const r = await pool.query('DELETE FROM attempts WHERE id = ANY($1::int[])', [ids]);
+  for (const id of ids) liveFrames.delete(id);
+  res.json({ deleted: r.rowCount });
+}));
+
+// PDF hisobot uchun bir nechta natijaning to'liq ma'lumoti bitta so'rovda
+app.post('/api/admin/attempts/report', asyncH(async (req, res) => {
+  const ids = parseIdList(req.body?.ids, 500);
+  const [attempts, answers, events, snapshots] = await Promise.all([
+    pool.query(`
+      SELECT id, class_id, student_name, team_name, status, score, total, violations, current_index,
+             cardinality(question_ids) AS question_count, camera, ip, user_agent, started_at, finished_at
+      FROM attempts WHERE id = ANY($1::int[])`, [ids]),
+    pool.query(`SELECT attempt_id, question, correct_answer, answer, is_correct, time_ms, timed_out
+                FROM attempt_answers WHERE attempt_id = ANY($1::int[]) ORDER BY id`, [ids]),
+    pool.query(`SELECT attempt_id, type, detail, is_violation, question_index, created_at
+                FROM attempt_events WHERE attempt_id = ANY($1::int[]) ORDER BY id`, [ids]),
+    pool.query(`SELECT attempt_id, id, reason, created_at
+                FROM attempt_snapshots WHERE attempt_id = ANY($1::int[]) ORDER BY id`, [ids])
+  ]);
+  const group = rows => {
+    const m = new Map();
+    for (const r of rows) {
+      if (!m.has(r.attempt_id)) m.set(r.attempt_id, []);
+      m.get(r.attempt_id).push(r);
+    }
+    return m;
+  };
+  const ans = group(answers.rows);
+  const ev = group(events.rows);
+  const snap = group(snapshots.rows);
+  res.json(attempts.rows.map(a => {
+    const evs = ev.get(a.id) || [];
+    const counts = {};
+    for (const e of evs) counts[e.type] = (counts[e.type] || 0) + 1;
+    return {
+      ...a,
+      risk: a.status === 'legacy' ? 'unknown' : riskLevel(a, counts),
+      event_counts: counts,
+      answers: ans.get(a.id) || [],
+      events: evs,
+      snapshots: snap.get(a.id) || []
+    };
+  }));
 }));
 
 // ─── Jonli kuzatuv ───
