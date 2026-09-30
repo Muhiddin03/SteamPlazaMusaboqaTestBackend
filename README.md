@@ -51,9 +51,14 @@ O'quvchi test yechayotganda tizim quyidagilarni kuzatadi va admin paneliga yozad
 - Ekranda o'quvchining ismi yozilgan suv belgisi turadi (skrinshot tarqatilsa, kimniki ekani ko'rinadi)
 - Matnni belgilash va nusxalash bloklangan
 - Bitta o'quvchi testni faqat bir marta topshiradi (admin natijani o'chirsa, qayta topshira oladi)
-- **Kamera nazorati** (standart: yoqilgan, Sozlamalar'dan o'chirish mumkin): o'quvchi rozilik bergandan keyin old kamera yoqiladi
-  - Admin **Kuzatuv** bo'limida barcha faol o'quvchilarning kamera kadrlarini har 4 soniyada ko'rib turadi (kadrlar faqat server xotirasida, bazaga yozilmaydi)
+- **Kamera nazorati** (standart: yoqilgan; admin **Kuzatuv** bo'limidagi tugma bilan istalgan paytda yoqadi/o'chiradi — yangi boshlanadigan testlarga qo'llanadi)
+  - Admin barcha faol o'quvchilarning kamera kadrlarini har 4 soniyada ko'radi; o'quvchini bossa — katta oynada **har soniyada** (kadrlar faqat server xotirasida)
   - Har 30 soniyada va har qoidabuzarlikda bittadan surat bazaga saqlanadi — keyin natija tafsilotida ko'rinadi
+- **Sun'iy intellekt bilan yuz kuzatuvi** (telefonning o'zida, MediaPipe; video hech qayerga yuborilmaydi):
+  - Kameradan chiqib ketish (yuz 5 s ko'rinmasa) va kamerada boshqa odam — **qoidabuzarlik** (sanaladi)
+  - Boshni yon tomonga burish, pastga qarash (kitob/telefon), ortiqcha harakat — **xavf ogohlantirishi**
+  - O'quvchi ekranida darhol qizil ogohlantirish chiqadi; adminda kartochka qizaradi, ovozli signal va bildirishnoma keladi
+  - Boshida ~2.5 soniya o'quvchining odatiy holati o'rganiladi (kalibrovka), keyin shunga nisbatan o'lchanadi
 
 **O'quvchi oqimi:** sinf → ism familiya → taqiqlar haqida ogohlantirish oynasi → kamera roziligi → test. Javob bitta bosishda yuboriladi, savol va variantlar telefon ekraniga to'liq sig'adi.
 

@@ -30,6 +30,10 @@ const LIVE_FRAME_TTL_MS = 60000;       // shundan eski jonli kadr ko'rsatilmaydi
 
 // attempt_id -> { buf, at } — jonli kuzatuv uchun oxirgi kamera kadri (faqat xotirada)
 const liveFrames = new Map();
+// attempt_id -> vaqt: admin shu o'quvchini katta oynada kuzatmoqda (kadrlar tezroq so'raladi)
+const watchedUntil = new Map();
+const LIVE_FRAME_MS = 4000;
+const WATCHED_FRAME_MS = 1000;
 
 function fatal(msg) {
   console.error('❌ ' + msg);
@@ -351,12 +355,16 @@ async function verifyAdminPassword(adminId, password) {
 // ─── ATTEMPT (TEST SESSIYASI) LOGIKASI ─────────────────────────────────────────
 // Qoidabuzarlik — sanaladi va limitga yetsa test to'xtatiladi
 const VIOLATION_TYPES = new Set([
-  'tab_hidden', 'focus_lost', 'fullscreen_exit', 'split_screen', 'multi_tab', 'camera_off'
+  'tab_hidden', 'focus_lost', 'fullscreen_exit', 'split_screen', 'multi_tab', 'camera_off',
+  'face_missing', 'multiple_faces'
 ]);
 // Ogohlantirish — faqat yoziladi, admin ko'radi
 const WARNING_TYPES = new Set([
-  'window_blur', 'copy', 'paste', 'key_blocked', 'screenshot', 'offline', 'tab_return', 'camera_denied', 'devtools'
+  'window_blur', 'copy', 'paste', 'key_blocked', 'screenshot', 'offline', 'tab_return', 'camera_denied', 'devtools',
+  'head_turned', 'looking_down', 'motion', 'ai_unavailable'
 ]);
+// Jonli kuzatuvda admin darhol ko'rishi kerak bo'lgan hodisalar
+const ALERT_TYPES = [...VIOLATION_TYPES, 'head_turned', 'looking_down', 'motion', 'copy', 'paste', 'screenshot', 'devtools', 'camera_denied'];
 
 async function withAttempt(req, fn) {
   const token = req.get('x-attempt-token') || '';
@@ -479,8 +487,10 @@ function riskLevel(a, counts) {
   if (a.status === 'terminated') return 'high';
   const c = k => Number(counts?.[k] || 0);
   const warnings = c('window_blur') + c('copy') + c('paste') + c('key_blocked') + c('screenshot') + c('reload') + c('devtools');
-  if (a.violations >= 2 || c('fast_answer') >= 5) return 'high';
-  if (a.violations >= 1 || c('fast_answer') >= 2 || c('connection_gap') >= 1 || c('camera_denied') || warnings >= 3) return 'medium';
+  const posture = c('head_turned') + c('looking_down') + c('motion');
+  if (a.violations >= 2 || c('fast_answer') >= 5 || posture >= 6) return 'high';
+  if (a.violations >= 1 || c('fast_answer') >= 2 || c('connection_gap') >= 1 || c('camera_denied') ||
+      c('ai_unavailable') || warnings >= 3 || posture >= 2) return 'medium';
   return 'low';
 }
 
@@ -678,6 +688,7 @@ app.post('/api/attempt/snapshot', asyncH(async (req, res) => {
 
   // Jonli kuzatuv uchun oxirgi kadr faqat xotirada turadi (bazaga yozilmaydi)
   liveFrames.set(a.id, { buf, at: Date.now() });
+  const nextMs = (watchedUntil.get(a.id) || 0) > Date.now() ? WATCHED_FRAME_MS : LIVE_FRAME_MS;
 
   // Bazaga: har SNAPSHOT_SAVE_MS da bir marta yoki qoidabuzarlik/qaytish paytida
   const since = a.last_snapshot_at ? Date.now() - new Date(a.last_snapshot_at) : Infinity;
@@ -687,7 +698,7 @@ app.post('/api/attempt/snapshot', asyncH(async (req, res) => {
       [a.id, buf, important ? reason : 'interval']);
     await pool.query('UPDATE attempts SET last_snapshot_at = $2 WHERE id = $1', [a.id, new Date()]);
   }
-  res.json({ ok: true });
+  res.json({ ok: true, next_ms: nextMs });
 }));
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -981,9 +992,15 @@ app.get('/api/admin/live', asyncH(async (req, res) => {
     SELECT a.id, a.class_id, a.student_name, a.current_index, cardinality(a.question_ids) AS question_count,
            a.violations, a.camera, a.started_at, a.last_seen_at, a.last_violation_at,
            (SELECT e.type FROM attempt_events e WHERE e.attempt_id = a.id AND e.is_violation
-             ORDER BY e.id DESC LIMIT 1) AS last_violation_type
+             ORDER BY e.id DESC LIMIT 1) AS last_violation_type,
+           (SELECT json_build_object('id', e.id, 'type', e.type, 'detail', e.detail, 'at', e.created_at)
+              FROM attempt_events e
+             WHERE e.attempt_id = a.id AND e.type = ANY($1) AND e.created_at > NOW() - interval '60 seconds'
+             ORDER BY e.id DESC LIMIT 1) AS last_alert,
+           (SELECT count(*) FROM attempt_events e
+             WHERE e.attempt_id = a.id AND e.type = ANY($1))::int AS alert_count
     FROM attempts a WHERE a.status = 'active'
-    ORDER BY a.class_id, a.student_name`);
+    ORDER BY a.class_id, a.student_name`, [ALERT_TYPES]);
   const now = Date.now();
   res.json(rows.map(r => {
     const f = liveFrames.get(r.id);
@@ -992,7 +1009,10 @@ app.get('/api/admin/live', asyncH(async (req, res) => {
 }));
 
 app.get('/api/admin/live/:id/frame', asyncH(async (req, res) => {
-  const f = liveFrames.get(parseId(req.params.id));
+  const id = parseId(req.params.id);
+  // ?focus=1 — admin shu o'quvchini katta oynada ko'rmoqda: o'quvchi kadrni har soniyada yuboradi
+  if (req.query.focus === '1') watchedUntil.set(id, Date.now() + 8000);
+  const f = liveFrames.get(id);
   if (!f || Date.now() - f.at > LIVE_FRAME_TTL_MS) throw new HttpError(404, 'Kadr yo\'q');
   res.set('Content-Type', 'image/jpeg').set('Cache-Control', 'private, no-store').send(f.buf);
 }));
@@ -1040,6 +1060,9 @@ app.use((err, req, res, next) => {
 async function sweepAbandoned() {
   for (const [id, f] of liveFrames) {
     if (Date.now() - f.at > LIVE_FRAME_TTL_MS) liveFrames.delete(id);
+  }
+  for (const [id, until] of watchedUntil) {
+    if (until < Date.now()) watchedUntil.delete(id);
   }
   const { rows } = await pool.query(
     `SELECT id FROM attempts WHERE status = 'active' AND last_seen_at < NOW() - make_interval(mins => $1)`,
