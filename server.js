@@ -154,6 +154,8 @@ async function initDB() {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS attempt_events_idx ON attempt_events(attempt_id, created_at);
+      -- Hodisa paytidagi kamera surati (dalil)
+      ALTER TABLE attempt_events ADD COLUMN IF NOT EXISTS snapshot_id INTEGER;
 
       CREATE TABLE IF NOT EXISTS attempt_snapshots (
         id SERIAL PRIMARY KEY,
@@ -362,10 +364,10 @@ const VIOLATION_TYPES = new Set([
 // Ogohlantirish — faqat yoziladi, admin ko'radi
 const WARNING_TYPES = new Set([
   'window_blur', 'copy', 'paste', 'key_blocked', 'screenshot', 'offline', 'tab_return', 'camera_denied', 'devtools',
-  'head_turned', 'looking_down', 'motion', 'ai_unavailable'
+  'head_turned', 'looking_down', 'motion', 'ai_unavailable', 'face_away'
 ]);
 // Jonli kuzatuvda admin darhol ko'rishi kerak bo'lgan hodisalar
-const ALERT_TYPES = [...VIOLATION_TYPES, 'head_turned', 'looking_down', 'motion', 'copy', 'paste', 'screenshot', 'devtools', 'camera_denied'];
+const ALERT_TYPES = [...VIOLATION_TYPES, 'head_turned', 'looking_down', 'motion', 'face_away', 'copy', 'paste', 'screenshot', 'devtools', 'camera_denied'];
 
 async function withAttempt(req, fn) {
   const token = req.get('x-attempt-token') || '';
@@ -377,11 +379,11 @@ async function withAttempt(req, fn) {
   });
 }
 
-async function logEvent(db, a, type, detail, isViolation) {
+async function logEvent(db, a, type, detail, isViolation, snapshotId = null) {
   await db.query(
-    `INSERT INTO attempt_events (attempt_id, type, detail, is_violation, question_index)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [a.id, type, detail || null, !!isViolation, a.current_index + 1]
+    `INSERT INTO attempt_events (attempt_id, type, detail, is_violation, question_index, snapshot_id)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [a.id, type, detail || null, !!isViolation, a.current_index + 1, snapshotId]
   );
 }
 
@@ -488,7 +490,7 @@ function riskLevel(a, counts) {
   if (a.status === 'terminated') return 'high';
   const c = k => Number(counts?.[k] || 0);
   const warnings = c('window_blur') + c('copy') + c('paste') + c('key_blocked') + c('screenshot') + c('reload') + c('devtools');
-  const posture = c('head_turned') + c('looking_down') + c('motion');
+  const posture = c('head_turned') + c('looking_down') + c('motion') + c('face_away');
   if (a.violations >= 2 || c('fast_answer') >= 5 || posture >= 6) return 'high';
   if (a.violations >= 1 || c('fast_answer') >= 2 || c('connection_gap') >= 1 || c('camera_denied') ||
       c('ai_unavailable') || warnings >= 3 || posture >= 2) return 'medium';
@@ -625,14 +627,33 @@ app.post('/api/attempt/answer', asyncH(async (req, res) => {
   res.json(state);
 }));
 
+// data:image/jpeg;base64,... → Buffer (yaroqsiz bo'lsa null)
+function parseJpeg(dataUrl) {
+  const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(typeof dataUrl === 'string' ? dataUrl : '');
+  if (!m) return null;
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length < 500 || buf.length > SNAPSHOT_MAX_BYTES || buf[0] !== 0xFF || buf[1] !== 0xD8) return null;
+  return buf;
+}
+
 app.post('/api/attempt/event', asyncH(async (req, res) => {
   const type = String(req.body?.type || '');
   if (!VIOLATION_TYPES.has(type) && !WARNING_TYPES.has(type)) throw new HttpError(400, 'Noma\'lum hodisa');
   const detail = cleanText(req.body?.detail, 200);
+  // Hodisa paytidagi kamera kadri (dalil) — hodisaga bog'lanib saqlanadi
+  const image = parseJpeg(req.body?.image);
   const s = await getSettings();
 
   const out = await withAttempt(req, async (db, a) => {
     if (a.status !== 'active') return { status: a.status, violations: a.violations, max_violations: s.max_violations };
+
+    let snapshotId = null;
+    if (image) {
+      const r = await db.query('INSERT INTO attempt_snapshots (attempt_id, image, reason) VALUES ($1, $2, $3) RETURNING id',
+        [a.id, image, type]);
+      snapshotId = r.rows[0].id;
+      await db.query('UPDATE attempts SET last_snapshot_at = $2 WHERE id = $1', [a.id, new Date()]);
+    }
 
     let counted = false;
     if (VIOLATION_TYPES.has(type)) {
@@ -644,7 +665,7 @@ app.post('/api/attempt/event', asyncH(async (req, res) => {
       }
       await db.query('UPDATE attempts SET violations = $2, last_violation_at = $3 WHERE id = $1', [a.id, a.violations, now]);
     }
-    await logEvent(db, a, type, detail, counted);
+    await logEvent(db, a, type, detail, counted, snapshotId);
 
     if (counted && s.max_violations > 0 && a.violations >= s.max_violations) {
       await logEvent(db, a, 'auto_terminated', `${a.violations} ta qoidabuzarlik`, false);
@@ -671,12 +692,8 @@ app.post('/api/attempt/heartbeat', asyncH(async (req, res) => {
 }));
 
 app.post('/api/attempt/snapshot', asyncH(async (req, res) => {
-  const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(typeof req.body?.image === 'string' ? req.body.image : '');
-  if (!m) throw new HttpError(400, 'Rasm formati noto\'g\'ri');
-  const buf = Buffer.from(m[1], 'base64');
-  if (buf.length < 500 || buf.length > SNAPSHOT_MAX_BYTES || buf[0] !== 0xFF || buf[1] !== 0xD8) {
-    throw new HttpError(400, 'Rasm yaroqsiz');
-  }
+  const buf = parseJpeg(req.body?.image);
+  if (!buf) throw new HttpError(400, 'Rasm yaroqsiz');
   const reason = cleanText(req.body?.reason, 40) || 'live';
   const token = req.get('x-attempt-token') || '';
   if (!token || token.length > 100) throw new HttpError(401, 'Test sessiyasi topilmadi');
@@ -949,7 +966,7 @@ app.get('/api/admin/attempts/:id', asyncH(async (req, res) => {
   const [answers, events, snapshots] = await Promise.all([
     pool.query(`SELECT test_id, question, correct_answer, answer, is_correct, time_ms, timed_out, created_at
                 FROM attempt_answers WHERE attempt_id = $1 ORDER BY id`, [id]),
-    pool.query(`SELECT type, detail, is_violation, question_index, created_at
+    pool.query(`SELECT id, type, detail, is_violation, question_index, snapshot_id, created_at
                 FROM attempt_events WHERE attempt_id = $1 ORDER BY id`, [id]),
     pool.query(`SELECT id, reason, created_at FROM attempt_snapshots WHERE attempt_id = $1 ORDER BY id`, [id])
   ]);
@@ -1015,7 +1032,7 @@ app.post('/api/admin/attempts/report', asyncH(async (req, res) => {
       FROM attempts WHERE id = ANY($1::int[])`, [ids]),
     pool.query(`SELECT attempt_id, question, correct_answer, answer, is_correct, time_ms, timed_out
                 FROM attempt_answers WHERE attempt_id = ANY($1::int[]) ORDER BY id`, [ids]),
-    pool.query(`SELECT attempt_id, type, detail, is_violation, question_index, created_at
+    pool.query(`SELECT attempt_id, id, type, detail, is_violation, question_index, snapshot_id, created_at
                 FROM attempt_events WHERE attempt_id = ANY($1::int[]) ORDER BY id`, [ids]),
     pool.query(`SELECT attempt_id, id, reason, created_at
                 FROM attempt_snapshots WHERE attempt_id = ANY($1::int[]) ORDER BY id`, [ids])
