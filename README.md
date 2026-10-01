@@ -53,10 +53,13 @@ O'quvchi test yechayotganda tizim quyidagilarni kuzatadi va admin paneliga yozad
 - Bitta o'quvchi testni faqat bir marta topshiradi (admin natijani o'chirsa, qayta topshira oladi)
 - **Kamera nazorati** (standart: yoqilgan; admin **Kuzatuv** bo'limidagi tugma bilan istalgan paytda yoqadi/o'chiradi — yangi boshlanadigan testlarga qo'llanadi)
   - Admin barcha faol o'quvchilarning kamera kadrlarini har 4 soniyada ko'radi; o'quvchini bossa — katta oynada **har soniyada** (kadrlar faqat server xotirasida)
-  - Har 30 soniyada va har qoidabuzarlikda bittadan surat bazaga saqlanadi — keyin natija tafsilotida ko'rinadi
+  - Bazaga faqat **dalil suratlari** saqlanadi: test boshida bitta va har bir qoida buzilgan paytda (aynan o'sha holat — masalan bosh burilgan kadr)
 - **Sun'iy intellekt bilan yuz kuzatuvi** (telefonning o'zida, MediaPipe; video hech qayerga yuborilmaydi):
   - Kameradan chiqib ketish (yuz 5 s ko'rinmasa) va kamerada boshqa odam — **qoidabuzarlik** (sanaladi)
-  - Boshni yon tomonga burish, pastga qarash (kitob/telefon), ortiqcha harakat — **xavf ogohlantirishi**
+  - Boshni yon tomonga burish, pastga qarash (kitob/telefon) — 3 s da **ogohlantirish**, 8 s davom etsa **qoidabuzarlik**
+  - Ortiqcha harakat — ogohlantirish
+  - Qoralama (✏️) ochiq paytda bosh holati tekshirilmaydi
+  - Ovozli signal admin panelning istalgan bo'limida ishlaydi ("Sinash" tugmasi bilan tekshiring)
   - O'quvchi ekranida darhol qizil ogohlantirish chiqadi; adminda kartochka qizaradi, ovozli signal va bildirishnoma keladi
   - Boshida ~2.5 soniya o'quvchining odatiy holati o'rganiladi (kalibrovka), keyin shunga nisbatan o'lchanadi
 

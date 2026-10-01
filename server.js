@@ -25,7 +25,6 @@ const ANSWER_GRACE_MS = 3000;          // tarmoq kechikishi uchun qo'shimcha vaq
 const VIOLATION_DEDUP_MS = 4000;       // bitta harakat bir necha hodisa chiqarsa, 1 marta sanaladi
 const ABANDON_AFTER_MIN = 5;           // shuncha daqiqa aloqa bo'lmasa test "tashlab ketilgan"
 const SNAPSHOT_MAX_BYTES = 150 * 1024;
-const SNAPSHOT_SAVE_MS = 30000;        // bazaga saqlanadigan surat oralig'i
 const LIVE_FRAME_TTL_MS = 60000;       // shundan eski jonli kadr ko'rsatilmaydi
 
 // attempt_id -> { buf, at } — jonli kuzatuv uchun oxirgi kamera kadri (faqat xotirada)
@@ -358,7 +357,7 @@ async function verifyAdminPassword(adminId, password) {
 // Qoidabuzarlik — sanaladi va limitga yetsa test to'xtatiladi
 const VIOLATION_TYPES = new Set([
   'tab_hidden', 'focus_lost', 'fullscreen_exit', 'split_screen', 'multi_tab', 'camera_off',
-  'face_missing', 'multiple_faces'
+  'face_missing', 'multiple_faces', 'head_turned_long', 'looking_down_long'
 ]);
 // Ogohlantirish — faqat yoziladi, admin ko'radi
 const WARNING_TYPES = new Set([
@@ -689,17 +688,19 @@ app.post('/api/attempt/snapshot', asyncH(async (req, res) => {
   if (!a) throw new HttpError(404, 'Test sessiyasi topilmadi');
   if (a.status !== 'active') return res.json({ ok: true, status: a.status });
 
-  // Jonli kuzatuv uchun oxirgi kadr faqat xotirada turadi (bazaga yozilmaydi)
-  liveFrames.set(a.id, { buf, at: Date.now() });
   const nextMs = (watchedUntil.get(a.id) || 0) > Date.now() ? WATCHED_FRAME_MS : LIVE_FRAME_MS;
 
-  // Bazaga: har SNAPSHOT_SAVE_MS da bir marta yoki qoidabuzarlik/qaytish paytida
-  const since = a.last_snapshot_at ? Date.now() - new Date(a.last_snapshot_at) : Infinity;
-  const important = reason !== 'live';
-  if ((important && since > 5000) || since > SNAPSHOT_SAVE_MS) {
-    await pool.query('INSERT INTO attempt_snapshots (attempt_id, image, reason) VALUES ($1, $2, $3)',
-      [a.id, buf, important ? reason : 'interval']);
-    await pool.query('UPDATE attempts SET last_snapshot_at = $2 WHERE id = $1', [a.id, new Date()]);
+  if (reason === 'live') {
+    // Jonli kuzatuv kadri faqat xotirada turadi (bazaga yozilmaydi)
+    liveFrames.set(a.id, { buf, at: Date.now() });
+  } else {
+    // Bazaga faqat dalil suratlari: test boshida va qoidabuzarlik/ogohlantirish paytida.
+    // Bir xil dalil ikki marta yuborilmasligi uchun 2 soniyalik himoya.
+    const since = a.last_snapshot_at ? Date.now() - new Date(a.last_snapshot_at) : Infinity;
+    if (since > 2000) {
+      await pool.query('INSERT INTO attempt_snapshots (attempt_id, image, reason) VALUES ($1, $2, $3)', [a.id, buf, reason]);
+      await pool.query('UPDATE attempts SET last_snapshot_at = $2 WHERE id = $1', [a.id, new Date()]);
+    }
   }
   res.json({ ok: true, next_ms: nextMs });
 }));
