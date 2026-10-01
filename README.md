@@ -55,10 +55,11 @@ O'quvchi test yechayotganda tizim quyidagilarni kuzatadi va admin paneliga yozad
   - Admin barcha faol o'quvchilarning kamera kadrlarini har 4 soniyada ko'radi; o'quvchini bossa — katta oynada **har soniyada** (kadrlar faqat server xotirasida)
   - Bazaga faqat **dalil suratlari** saqlanadi: test boshida bitta va har bir qoida buzilgan paytda (aynan o'sha holat — masalan bosh burilgan kadr)
 - **Sun'iy intellekt bilan yuz kuzatuvi** (telefonning o'zida, MediaPipe; video hech qayerga yuborilmaydi):
-  - Yuz kameradan chiqsa — 1 s da **ogohlantirish**, 3 s davom etsa **qoidabuzarlik**
-  - Kamerada boshqa odam — 1 s da **qoidabuzarlik**
-  - Boshni yon tomonga burish, pastga qarash (kitob/telefon) — 1 s da **ogohlantirish**, 6 s davom etsa **qoidabuzarlik**
-  - Ortiqcha harakat — 0.5 s da ogohlantirish
+  - Yuz kameradan chiqsa — 6 s da **ogohlantirish**, 20 s davom etsa **qoidabuzarlik**
+  - Kamerada boshqa odam — 2 s da ogohlantirish, 6 s da **qoidabuzarlik**
+  - Boshni yon tomonga burish, pastga qarash (kitob/telefon) — 6 s da **ogohlantirish**, 15 s davom etsa **qoidabuzarlik**
+  - Ortiqcha harakat — 6 s da ogohlantirish
+  - Qog'oz rejimi yoqilsa — o'quvchi rozilik oynasida bu haqda alohida yozuv chiqadi
   - O'quvchi ekranida chiqqan **har bir** ogohlantirish o'qituvchiga ham boradi — aynan o'sha paytdagi surat bilan; admin har bir o'quvchida "nima — necha marta" xulosasini va har bir hodisaning suratini ko'radi
   - Kameraga ruxsat berilmasa (ayniqsa kompyuterda) — o'quvchi oynasida qanday ruxsat berish ko'rsatmasi va "Qayta urinish" tugmasi chiqadi
   - Qoralama (✏️) ochiq paytda bosh holati tekshirilmaydi

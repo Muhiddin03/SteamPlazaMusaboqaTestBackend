@@ -364,10 +364,10 @@ const VIOLATION_TYPES = new Set([
 // Ogohlantirish — faqat yoziladi, admin ko'radi
 const WARNING_TYPES = new Set([
   'window_blur', 'copy', 'paste', 'key_blocked', 'screenshot', 'offline', 'tab_return', 'camera_denied', 'devtools',
-  'head_turned', 'looking_down', 'motion', 'ai_unavailable', 'face_away'
+  'head_turned', 'looking_down', 'motion', 'ai_unavailable', 'face_away', 'multiple_faces_short'
 ]);
 // Jonli kuzatuvda admin darhol ko'rishi kerak bo'lgan hodisalar
-const ALERT_TYPES = [...VIOLATION_TYPES, 'head_turned', 'looking_down', 'motion', 'face_away', 'copy', 'paste', 'screenshot', 'devtools', 'camera_denied'];
+const ALERT_TYPES = [...VIOLATION_TYPES, 'head_turned', 'looking_down', 'motion', 'face_away', 'multiple_faces_short', 'copy', 'paste', 'screenshot', 'devtools', 'camera_denied'];
 
 async function withAttempt(req, fn) {
   const token = req.get('x-attempt-token') || '';
@@ -490,7 +490,7 @@ function riskLevel(a, counts) {
   if (a.status === 'terminated') return 'high';
   const c = k => Number(counts?.[k] || 0);
   const warnings = c('window_blur') + c('copy') + c('paste') + c('key_blocked') + c('screenshot') + c('reload') + c('devtools');
-  const posture = c('head_turned') + c('looking_down') + c('motion') + c('face_away');
+  const posture = c('head_turned') + c('looking_down') + c('motion') + c('face_away') + c('multiple_faces_short');
   if (a.violations >= 2 || c('fast_answer') >= 5 || posture >= 6) return 'high';
   if (a.violations >= 1 || c('fast_answer') >= 2 || c('connection_gap') >= 1 || c('camera_denied') ||
       c('ai_unavailable') || warnings >= 3 || posture >= 2) return 'medium';
