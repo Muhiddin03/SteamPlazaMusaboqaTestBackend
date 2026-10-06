@@ -1348,8 +1348,48 @@ async function sweepAbandoned() {
 }
 
 // ─── START SERVER ──────────────────────────────────────────────────────────────
+// ─── TAYYOR SAVOLLAR TO'PLAMLARI (backend/seed/*.json) ─────────────────────────
+// Har bir fayl bir marta yoziladi (settings: seed:<id>). Shu sinf+fandagi eski savollar almashtiriladi.
+// Keyin admin savollarni o'zgartirsa yoki o'chirsa — qayta yozilmaydi.
+async function runSeeds() {
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(__dirname, 'seed');
+  if (!fs.existsSync(dir)) return;
+  for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort()) {
+    const seed = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+    const flag = `seed:${seed.id}`;
+    if ((await pool.query('SELECT 1 FROM settings WHERE key = $1', [flag])).rowCount) continue;
+    await tx(async db => {
+      const imageIds = {};
+      for (const [hash, img] of Object.entries(seed.images || {})) {
+        const { rows } = await db.query(`
+          INSERT INTO test_images (hash, mime, data) VALUES ($1, $2, $3)
+          ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash RETURNING id`,
+          [hash, img.mime, Buffer.from(img.data, 'base64')]);
+        imageIds[hash] = rows[0].id;
+      }
+      let total = 0;
+      for (const set of seed.sets) {
+        await db.query('INSERT INTO classes (id) VALUES ($1) ON CONFLICT DO NOTHING', [set.class_id]);
+        await db.query('DELETE FROM tests WHERE class_id = $1 AND subject = $2', [set.class_id, set.subject]);
+        for (let i = 0; i < set.questions.length; i++) {
+          const q = set.questions[i];
+          const t = parseTestBody({ question: q.text, correct_answer: q.correct, type: q.type, options: q.options, subject: set.subject });
+          t.image_id = q.image ? imageIds[q.image] : null;
+          t.sort_order = i + 1;
+          if (await insertTest(db, set.class_id, t)) total++;
+        }
+      }
+      await db.query('INSERT INTO settings (key, value) VALUES ($1, $2)', [flag, JSON.stringify({ at: new Date(), total })]);
+      console.log(`📚 Savollar yuklandi (${file}): ${seed.sets.length} ta to'plam, ${total} ta savol`);
+    });
+  }
+}
+
 initDB()
   .then(seedAdmin)
+  .then(runSeeds)
   .then(() => {
     const server = app.listen(PORT, () => console.log(`🚀 Server ${PORT}-portda ishlamoqda`));
     setInterval(() => sweepAbandoned().catch(err => console.error('Sweep xatosi:', err.message)), 60 * 1000).unref();
