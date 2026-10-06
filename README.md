@@ -67,6 +67,16 @@ O'quvchi test yechayotganda tizim quyidagilarni kuzatadi va admin paneliga yozad
   - O'quvchi ekranida darhol qizil ogohlantirish chiqadi; adminda kartochka qizaradi, ovozli signal va bildirishnoma keladi
   - Boshida ~2.5 soniya o'quvchining odatiy holati o'rganiladi (kalibrovka), keyin shunga nisbatan o'lchanadi
 
+**Fanlar va Word'dan yuklash:**
+- O'quvchi: sinf → fan (sinfda bitta fan bo'lsa bu qadam o'tkaziladi) → ism → test. Har bir fandan bir marta topshiriladi.
+- Admin → **Savollar** → **"Word fayldan yuklash"**: test fayllari (`fizika 7-sinf.docx`, `matematika 8-sinf.docx` ...) va `kalit.docx` ni birga tanlang → "O'qish va tekshirish" → ko'rib chiqing → "Yuklash".
+  - Test fayli: savol — Word ro'yxatining 1-darajasi, variantlar — 2-darajasi (yoki qo'lda "1." va "A)"). Variantsiz savol — **yozma javobli**.
+  - Savol oldidagi rasm o'sha savolga biriktiriladi; o'quvchi rasmni bosib kattalashtiradi.
+  - Kalit fayli: "7-SINF" sarlavhasi va jadval: Savol № | Variant | To'g'ri javob (yozma savolda Variant "—").
+  - Sinf va fan nomi fayl nomidan olinadi, yuklashdan oldin o'zgartirish mumkin. "Eski savollarni almashtirish" yoqilsa, shu sinf+fandagi eski savollar o'chiriladi.
+- Fayldan yuklangan savollar **fayldagi tartibda** beriladi (keyingi savol oldingisiga tayanishi mumkin); variantlar aralashtiriladi.
+- Yozma javob: son va birlik solishtiriladi — "10", "10 m/s", "10m/s", "10 м/с", "10,0" to'g'ri; "10 km/soat" xato. Yozma savolga 2 barobar vaqt beriladi.
+
 **Matematika testlari:** admin **Kuzatuv** yoki **Sozlamalar**da "Qog'ozda ishlash" ni yoqsa — pastga qarash va yozish harakati xavf hisoblanmaydi, yuz 12 soniyagacha ko'rinmasa kechiriladi. Bundan tashqari test ekranida har doim **✏️ Qoralama** bor — o'quvchi barmoq bilan misol ishlaydi (har savolda tozalanadi).
 
 **Natijalar va PDF:**

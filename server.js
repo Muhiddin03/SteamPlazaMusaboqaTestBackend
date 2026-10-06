@@ -127,8 +127,28 @@ async function initDB() {
       );
       CREATE INDEX IF NOT EXISTS attempts_class_idx ON attempts(class_id, started_at DESC);
       CREATE INDEX IF NOT EXISTS attempts_status_idx ON attempts(status);
-      CREATE UNIQUE INDEX IF NOT EXISTS attempts_one_per_student
-        ON attempts(class_id, lower(student_name), lower(team_name)) WHERE status <> 'legacy';
+
+      -- Fanlar: savollar va urinishlar fan bo'yicha ajratiladi ('' — fansiz eski savollar)
+      ALTER TABLE tests ADD COLUMN IF NOT EXISTS subject VARCHAR(60) NOT NULL DEFAULT '';
+      ALTER TABLE tests ADD COLUMN IF NOT EXISTS qtype VARCHAR(10) NOT NULL DEFAULT 'choice';
+      ALTER TABLE tests ADD COLUMN IF NOT EXISTS image_id INTEGER;
+      ALTER TABLE tests ADD COLUMN IF NOT EXISTS sort_order INTEGER;
+      CREATE INDEX IF NOT EXISTS tests_class_subject_idx ON tests(class_id, subject);
+      ALTER TABLE attempts ADD COLUMN IF NOT EXISTS subject VARCHAR(60) NOT NULL DEFAULT '';
+
+      -- Bitta o'quvchi har bir fandan bir marta topshiradi
+      DROP INDEX IF EXISTS attempts_one_per_student;
+      CREATE UNIQUE INDEX IF NOT EXISTS attempts_one_per_student_subject
+        ON attempts(class_id, subject, lower(student_name), lower(team_name)) WHERE status <> 'legacy';
+
+      -- Savol rasmlari (bir xil rasm bir marta saqlanadi)
+      CREATE TABLE IF NOT EXISTS test_images (
+        id SERIAL PRIMARY KEY,
+        hash CHAR(64) UNIQUE NOT NULL,
+        mime VARCHAR(40) NOT NULL,
+        data BYTEA NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
 
       CREATE TABLE IF NOT EXISTS attempt_answers (
         id SERIAL PRIMARY KEY,
@@ -387,8 +407,63 @@ async function logEvent(db, a, type, detail, isViolation, snapshotId = null) {
   );
 }
 
+// ─── Yozma javobni tekshirish ───
+// "10", "10 m/s", "10m/s", "10 м/с", "13,3" — son bir xil bo'lsa to'g'ri; o'quvchi birlik yozsa, u ham mos kelishi kerak.
+const CYR_TO_LAT = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ж: 'j', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm',
+  н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'x', ц: 's', ч: 'ch', ш: 'sh', ы: 'i', э: 'e', ю: 'yu', я: 'ya', ў: 'o', қ: 'q', ғ: 'g', ҳ: 'h' };
+const SUPERSCRIPT = { '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9', '⁻': '-' };
+const UNIT_WORDS = [
+  [/kilometr(?:lar)?/g, 'km'], [/santimetr/g, 'cm'], [/sm(?=\b|$)/g, 'cm'], [/metr(?:lar)?/g, 'm'],
+  [/sekund(?:lar)?|soniya|sek/g, 's'], [/minut|daqiqa/g, 'min'], [/km\/s(?:oat)?$/g, 'km/soat'],
+  [/km\/h$/g, 'km/soat'], [/joul/g, 'j'], [/vatt/g, 'w'], [/nyuton/g, 'n'], [/amper/g, 'a'], [/volt/g, 'v'], [/om$/g, 'ω']
+];
+
+function normalizeAnswer(s) {
+  let t = String(s ?? '').toLowerCase()
+    .replace(/[‘’ʻʼ`´]/g, "'")
+    .replace(/[Ѐ-ӿ]/g, ch => CYR_TO_LAT[ch] ?? ch)
+    .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁻]/g, ch => SUPERSCRIPT[ch])
+    .replace(/[·×]/g, '*')
+    .replace(/(\d)\s+(?=\d{3}\b)/g, '$1')   // "42 000" -> "42000"
+    .replace(/,/g, '.')
+    .replace(/\s+/g, '');
+  return t;
+}
+
+function splitNumber(s) {
+  const t = normalizeAnswer(s);
+  const m = /^[^\d-]*?(-?\d+(?:\.\d+)?)(?:\*10\^?(-?\d+))?(.*)$/.exec(t);
+  if (!m) return null;
+  let value = Number(m[1]);
+  if (m[2] !== undefined) value *= 10 ** Number(m[2]);
+  let unit = m[3].replace(/^[.:]+/, '').replace(/\(.*\)$/, '');
+  for (const [re, rep] of UNIT_WORDS) unit = unit.replace(re, rep);
+  return { value, unit };
+}
+
+function isOpenAnswerCorrect(answer, correct) {
+  if (answer == null || !String(answer).trim()) return false;
+  if (normalizeAnswer(answer) === normalizeAnswer(correct)) return true;
+  const a = splitNumber(answer);
+  const c = splitNumber(correct);
+  if (!a || !c) return false;
+  const tol = Math.max(Math.abs(c.value) * 0.005, 1e-9);   // yaxlitlash uchun 0.5% farq
+  if (Math.abs(a.value - c.value) > tol) return false;
+  return !a.unit || !c.unit || a.unit === c.unit;
+}
+
+function isAnswerCorrect(test, answer) {
+  if (answer == null) return false;
+  return test.qtype === 'open' ? isOpenAnswerCorrect(answer, test.correct_answer) : answer === test.correct_answer;
+}
+
+// Yozma javobli savolga 2 barobar ko'p vaqt (hisoblash va yozish uchun)
+function questionLimitMs(s, test) {
+  return s.question_time_sec * 1000 * (test && test.qtype === 'open' ? 2 : 1);
+}
+
 async function recordAnswer(db, a, test, answer, timeMs, timedOut) {
-  const isCorrect = !timedOut && answer !== null && answer === test.correct_answer;
+  const isCorrect = !timedOut && isAnswerCorrect(test, answer);
   await db.query(
     `INSERT INTO attempt_answers (attempt_id, test_id, question, correct_answer, answer, is_correct, time_ms, timed_out)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -413,20 +488,21 @@ async function finishAttempt(db, a, status) {
 // Joriy savolni (bazadan o'qilgan qatorni) qaytaradi — qayta so'ralmasligi uchun.
 async function syncAttempt(db, a, s) {
   if (a.status !== 'active') return null;
-  const limitMs = s.question_time_sec * 1000;
   for (;;) {
     const ids = a.question_ids || [];
     if (a.current_index >= ids.length) {
       await finishAttempt(db, a, 'finished');
       return null;
     }
-    const { rows } = await db.query('SELECT id, question, correct_answer, options FROM tests WHERE id = $1', [ids[a.current_index]]);
+    const { rows } = await db.query(
+      'SELECT id, question, correct_answer, options, qtype, image_id FROM tests WHERE id = $1', [ids[a.current_index]]);
     if (!rows[0]) {
       ids.splice(a.current_index, 1);
       a.question_ids = ids;
       await db.query('UPDATE attempts SET question_ids = $2, total = $3 WHERE id = $1', [a.id, ids, ids.length]);
       continue;
     }
+    const limitMs = questionLimitMs(s, rows[0]);
     const startedAt = new Date(a.question_started_at).getTime();
     if (Date.now() - startedAt <= limitMs + ANSWER_GRACE_MS) return rows[0];
 
@@ -453,37 +529,36 @@ async function buildState(db, a, s, current) {
   const currentId = a.question_ids[a.current_index];
   const t = current && current.id === currentId
     ? current
-    : (await db.query('SELECT id, question, options FROM tests WHERE id = $1', [currentId])).rows[0];
-  const limitMs = s.question_time_sec * 1000;
+    : (await db.query('SELECT id, question, options, qtype, image_id FROM tests WHERE id = $1', [currentId])).rows[0];
+  const limitMs = questionLimitMs(s, t);
   const elapsed = Date.now() - new Date(a.question_started_at).getTime();
+  state.subject = a.subject || '';
   state.question = {
     id: t.id,
     number: a.current_index + 1,
     text: t.question,
-    options: shuffle(uniqueOptions(t.options)),
+    type: t.qtype === 'open' ? 'open' : 'choice',
+    image_id: t.image_id || null,
+    options: t.qtype === 'open' ? [] : shuffle(uniqueOptions(t.options)),
     limit_ms: limitMs,
     remaining_ms: Math.max(0, limitMs - elapsed)
   };
   return state;
 }
 
-async function pickQuestions(classId, s) {
+// Savollar: fayldan yuklangan to'plam (hammasida tartib raqami bor) — fayldagi tartibda,
+// chunki keyingi savol oldingisiga tayanishi mumkin; qo'lda qo'shilganlar — aralash.
+async function pickQuestions(classId, subject, s) {
   const grade = /^(\d{1,2})-/.exec(classId)?.[1];
-  const params = [];
-  let sql;
-  if (s.share_grade_tests && grade) {
-    params.push(`^${grade}-`);
-    sql = 'SELECT id FROM tests WHERE class_id ~ $1 ORDER BY random()';
-  } else {
-    params.push(classId);
-    sql = 'SELECT id FROM tests WHERE class_id = $1 ORDER BY random()';
-  }
-  if (s.questions_per_attempt > 0) {
-    params.push(s.questions_per_attempt);
-    sql += ' LIMIT $2';
-  }
-  const { rows } = await pool.query(sql, params);
-  return rows.map(r => r.id);
+  const shared = s.share_grade_tests && grade;
+  const { rows } = await pool.query(
+    `SELECT id, sort_order FROM tests WHERE ${shared ? 'class_id ~ $1' : 'class_id = $1'} AND subject = $2`,
+    [shared ? `^${grade}-` : classId, subject]);
+  let list = rows;
+  if (list.length && list.every(r => r.sort_order != null)) list = list.sort((x, z) => x.sort_order - z.sort_order || x.id - z.id);
+  else list = shuffle(list);
+  if (s.questions_per_attempt > 0) list = list.slice(0, s.questions_per_attempt);
+  return list.map(r => r.id);
 }
 
 function riskLevel(a, counts) {
@@ -531,9 +606,23 @@ app.get('/', (req, res) => res.json({ status: 'ok', message: 'Steam Plaza API is
 // PUBLIC (O'QUVCHI) API
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Sinflar va ulardagi fanlar (savoli bor fanlar, nomi bo'yicha)
 app.get('/api/classes', asyncH(async (req, res) => {
-  const { rows } = await pool.query('SELECT id FROM classes ORDER BY id');
+  const { rows } = await pool.query(`
+    SELECT c.id,
+           COALESCE((SELECT json_agg(json_build_object('subject', s.subject, 'count', s.n) ORDER BY s.subject)
+                     FROM (SELECT subject, count(*)::int AS n FROM tests t WHERE t.class_id = c.id GROUP BY subject) s),
+                    '[]'::json) AS subjects
+    FROM classes c
+    ORDER BY (substring(c.id from '^\\d+'))::int NULLS LAST, c.id`);
   res.json(rows);
+}));
+
+// Savol rasmi (test paytida o'quvchiga ko'rsatiladi)
+app.get('/api/test-images/:id', asyncH(async (req, res) => {
+  const { rows } = await pool.query('SELECT mime, data FROM test_images WHERE id = $1', [parseId(req.params.id)]);
+  if (!rows[0]) throw new HttpError(404, 'Rasm topilmadi');
+  res.set('Content-Type', rows[0].mime).set('Cache-Control', 'public, max-age=86400').send(rows[0].data);
 }));
 
 app.get('/api/settings', asyncH(async (req, res) => {
@@ -560,22 +649,23 @@ app.post('/api/attempt/start', startLimiter, asyncH(async (req, res) => {
     throw new HttpError(400, 'Bu test uchun kamera yoqilishi shart');
   }
 
-  const ids = await pickQuestions(classId, s);
-  if (!ids.length) throw new HttpError(404, 'Bu sinf uchun hali savollar kiritilmagan');
+  const subject = cleanText(req.body?.subject, 60);
+  const ids = await pickQuestions(classId, subject, s);
+  if (!ids.length) throw new HttpError(404, subject ? `${classId} uchun "${subject}" fanidan savollar yo'q` : 'Bu sinf uchun hali savollar kiritilmagan');
 
   const token = crypto.randomBytes(32).toString('base64url');
   let a;
   try {
     const { rows } = await pool.query(`
       INSERT INTO attempts (class_id, student_name, team_name, token_hash, question_ids, total,
-                            question_started_at, camera, ip, user_agent)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+                            question_started_at, camera, ip, user_agent, subject)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
       [classId, studentName, teamName || '-', sha256(token), ids, ids.length, new Date(),
-        req.body?.camera === true, (req.ip || '').slice(0, 64), cleanText(req.get('user-agent'), 300)]);
+        req.body?.camera === true, (req.ip || '').slice(0, 64), cleanText(req.get('user-agent'), 300), subject]);
     a = rows[0];
   } catch (err) {
     if (err.code === '23505') {
-      throw new HttpError(409, 'Siz bu testni allaqachon boshlagansiz. Qayta topshirish uchun o\'qituvchingizga murojaat qiling.');
+      throw new HttpError(409, `Siz ${subject ? `"${subject}" fanidan ` : ''}bu testni allaqachon boshlagansiz. Qayta topshirish uchun o'qituvchingizga murojaat qiling.`);
     }
     throw err;
   }
@@ -598,13 +688,15 @@ app.get('/api/attempt/state', asyncH(async (req, res) => {
 app.post('/api/attempt/answer', asyncH(async (req, res) => {
   const s = await getSettings();
   const questionId = Number(req.body?.question_id);
-  const answer = req.body?.answer == null ? null : String(req.body.answer).slice(0, 1000);
+  const raw = req.body?.answer == null ? null : String(req.body.answer).slice(0, 1000);
 
   const state = await withAttempt(req, async (db, a) => {
     let current = await syncAttempt(db, a, s);
     if (a.status === 'active' && current && current.id === questionId) {
       const t = current;
-      if (answer !== null && !uniqueOptions(t.options).includes(answer)) {
+      // Yozma javob: bo'sh qator — javobsiz
+      const answer = t.qtype === 'open' && raw !== null ? (cleanText(raw, 200) || null) : raw;
+      if (answer !== null && t.qtype !== 'open' && !uniqueOptions(t.options).includes(answer)) {
         throw new HttpError(400, 'Noto\'g\'ri javob varianti');
       }
       const elapsed = Date.now() - new Date(a.question_started_at).getTime();
@@ -780,8 +872,12 @@ app.post('/api/admin/password', asyncH(async (req, res) => {
 // ─── Sinflar ───
 app.get('/api/admin/classes', asyncH(async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT c.id, (SELECT count(*) FROM tests t WHERE t.class_id = c.id)::int AS test_count
-    FROM classes c ORDER BY c.id`);
+    SELECT c.id, (SELECT count(*) FROM tests t WHERE t.class_id = c.id)::int AS test_count,
+           COALESCE((SELECT json_agg(json_build_object('subject', s.subject, 'count', s.n) ORDER BY s.subject)
+                     FROM (SELECT subject, count(*)::int AS n FROM tests t WHERE t.class_id = c.id GROUP BY subject) s),
+                    '[]'::json) AS subjects
+    FROM classes c
+    ORDER BY (substring(c.id from '^\\d+'))::int NULLS LAST, c.id`);
   res.json(rows);
 }));
 
@@ -803,41 +899,82 @@ app.delete('/api/admin/classes/:id', asyncH(async (req, res) => {
   res.json({ success: true });
 }));
 
+// ─── Savol rasmlari ───
+const IMAGE_MAX_BYTES = 1.5 * 1024 * 1024;
+
+// data:image/png;base64,... → test_images ga saqlaydi (bir xil rasm bir marta), id qaytaradi
+async function saveTestImage(db, dataUrl) {
+  if (!dataUrl) return null;
+  const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl));
+  if (!m) throw new HttpError(400, 'Rasm formati PNG, JPG, GIF yoki WEBP bo\'lishi kerak');
+  const buf = Buffer.from(m[2], 'base64');
+  if (!buf.length || buf.length > IMAGE_MAX_BYTES) throw new HttpError(400, 'Rasm hajmi 1.5 MB dan oshmasin');
+  const hash = crypto.createHash('sha256').update(buf).digest('hex');
+  const { rows } = await db.query(`
+    INSERT INTO test_images (hash, mime, data) VALUES ($1, $2, $3)
+    ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash RETURNING id`, [hash, m[1], buf]);
+  return rows[0].id;
+}
+
 // ─── Savollar ───
+// Turi: 'choice' (variantli) yoki 'open' (o'quvchi javobni yozadi).
 // Xato javoblar massiv (wrong_answers) yoki alohida maydonlar (wrong1, wrong2, wrong3) ko'rinishida kelishi mumkin
 function parseTestBody(body) {
-  const question = cleanMultiline(body?.question, 1000);
+  const question = cleanMultiline(body?.question, 2000);
   const correct = cleanText(body?.correct_answer, 300);
-  const rawWrong = Array.isArray(body?.wrong_answers)
-    ? body.wrong_answers
-    : [body?.wrong1, body?.wrong2, body?.wrong3, body?.wrong4];
-  const wrong = [];
-  for (const w of rawWrong.slice(0, 5)) {
-    const v = cleanText(w, 300);
-    if (v && !wrong.some(x => x.toLowerCase() === v.toLowerCase())) wrong.push(v);
-  }
+  const qtype = body?.type === 'open' || body?.qtype === 'open' ? 'open' : 'choice';
+  const subject = cleanText(body?.subject, 60);
   if (question.length < 3) throw new HttpError(400, 'Savol matnini kiriting');
   if (!correct) throw new HttpError(400, 'To\'g\'ri javobni kiriting');
-  if (!wrong.length) throw new HttpError(400, 'Kamida bitta xato javob kiriting');
-  if (wrong.some(w => w.toLowerCase() === correct.toLowerCase())) {
-    throw new HttpError(400, 'Xato javob to\'g\'ri javob bilan bir xil bo\'lmasligi kerak');
+  if (qtype === 'open') return { question, correct, options: '[]', qtype, subject };
+
+  let options;
+  if (Array.isArray(body?.options) && body.options.length) {
+    // Fayldagi tartibdagi barcha variantlar (to'g'risi ham ichida)
+    options = [];
+    for (const o of body.options.slice(0, 8)) {
+      const v = cleanText(o, 300);
+      if (v && !options.includes(v)) options.push(v);
+    }
+    if (!options.includes(correct)) throw new HttpError(400, 'To\'g\'ri javob variantlar ichida yo\'q');
+    if (options.length < 2) throw new HttpError(400, 'Kamida 2 ta variant kerak');
+  } else {
+    const rawWrong = Array.isArray(body?.wrong_answers)
+      ? body.wrong_answers
+      : [body?.wrong1, body?.wrong2, body?.wrong3, body?.wrong4];
+    const wrong = [];
+    for (const w of rawWrong.slice(0, 5)) {
+      const v = cleanText(w, 300);
+      if (v && !wrong.some(x => x.toLowerCase() === v.toLowerCase())) wrong.push(v);
+    }
+    if (!wrong.length) throw new HttpError(400, 'Kamida bitta xato javob kiriting');
+    if (wrong.some(w => w.toLowerCase() === correct.toLowerCase())) {
+      throw new HttpError(400, 'Xato javob to\'g\'ri javob bilan bir xil bo\'lmasligi kerak');
+    }
+    options = [correct, ...wrong];
   }
-  return { question, correct, options: JSON.stringify([correct, ...wrong]) };
+  return { question, correct, options: JSON.stringify(options), qtype, subject };
 }
 
 app.get('/api/admin/classes/:id/tests', asyncH(async (req, res) => {
-  const { rows } = await pool.query(
-    'SELECT id, class_id, question, correct_answer, options FROM tests WHERE class_id = $1 ORDER BY id', [req.params.id]);
+  const subject = typeof req.query.subject === 'string' ? req.query.subject : null;
+  const { rows } = await pool.query(`
+    SELECT id, class_id, subject, qtype, image_id, sort_order, question, correct_answer, options
+    FROM tests WHERE class_id = $1 AND ($2::varchar IS NULL OR subject = $2)
+    ORDER BY subject, sort_order NULLS LAST, id`, [req.params.id, subject]);
   res.json(rows.map(r => ({ ...r, options: uniqueOptions(r.options) })));
 }));
 
-// Sinfda xuddi shu savol bo'lsa qo'shmaydi. true = qo'shildi
+// Sinf+fanda xuddi shu savol bo'lsa qo'shmaydi. true = qo'shildi
 async function insertTest(db, classId, t) {
   const dup = await db.query(
-    'SELECT 1 FROM tests WHERE class_id = $1 AND lower(btrim(question)) = lower($2) LIMIT 1', [classId, t.question]);
+    'SELECT 1 FROM tests WHERE class_id = $1 AND subject = $2 AND lower(btrim(question)) = lower($3) LIMIT 1',
+    [classId, t.subject || '', t.question]);
   if (dup.rowCount) return false;
-  await db.query('INSERT INTO tests (class_id, question, correct_answer, options) VALUES ($1, $2, $3, $4)',
-    [classId, t.question, t.correct, t.options]);
+  await db.query(`
+    INSERT INTO tests (class_id, subject, qtype, image_id, sort_order, question, correct_answer, options)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [classId, t.subject || '', t.qtype || 'choice', t.image_id || null, t.sort_order ?? null, t.question, t.correct, t.options]);
   return true;
 }
 
@@ -853,6 +990,7 @@ app.post('/api/admin/classes/:id/tests', asyncH(async (req, res) => {
   const added = [];
   const skipped = [];
   await tx(async db => {
+    t.image_id = await saveTestImage(db, req.body?.image);
     for (const cls of wanted.filter(c => existing.has(c))) {
       (await insertTest(db, cls, t) ? added : skipped).push(cls);
     }
@@ -860,7 +998,7 @@ app.post('/api/admin/classes/:id/tests', asyncH(async (req, res) => {
   res.status(201).json({ added, skipped });
 }));
 
-// Ommaviy yuklash (JSON/CSV fayldan): [{ class_id, question, correct_answer, wrong1, wrong2, wrong3 }]
+// Ommaviy yuklash (JSON/CSV fayldan): [{ class_id, subject, question, correct_answer, wrong1, wrong2, wrong3 }]
 app.post('/api/admin/tests/bulk', asyncH(async (req, res) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : null;
   if (!items || !items.length) throw new HttpError(400, 'Fayl bo\'sh');
@@ -889,11 +1027,55 @@ app.post('/api/admin/tests/bulk', asyncH(async (req, res) => {
   res.json({ added, skipped, failed: errors.length, errors: errors.slice(0, 30) });
 }));
 
-// Sinfdagi takroriy savollarni o'chirish (har biridan eng birinchisi qoladi)
+// Word fayldan import (brauzerda o'qilgan): sinf + fan bo'yicha savollar to'plami.
+// { sets: [{ class_id, subject, questions: [{ text, type, options, correct, image }] }], replace: true }
+// replace — shu sinf+fandagi eski savollar o'chirilib, yangilari fayldagi tartibda yoziladi.
+app.post('/api/admin/tests/import', asyncH(async (req, res) => {
+  const sets = Array.isArray(req.body?.sets) ? req.body.sets : null;
+  if (!sets || !sets.length) throw new HttpError(400, 'Yuklash uchun savollar yo\'q');
+  if (sets.length > 50) throw new HttpError(400, 'Bir martada ko\'pi bilan 50 ta fayl');
+  const replace = req.body?.replace !== false;
+
+  const result = [];
+  await tx(async db => {
+    for (const set of sets) {
+      const classId = cleanText(set?.class_id, 50);
+      const subject = cleanText(set?.subject, 60);
+      if (!CLASS_ID_RE.test(classId)) throw new HttpError(400, `Sinf nomi noto'g'ri: "${classId}"`);
+      if (!subject) throw new HttpError(400, `${classId}: fan nomi kiritilmagan`);
+      const questions = Array.isArray(set?.questions) ? set.questions : [];
+      if (!questions.length || questions.length > 300) throw new HttpError(400, `${classId} ${subject}: savollar soni noto'g'ri`);
+
+      await db.query('INSERT INTO classes (id) VALUES ($1) ON CONFLICT DO NOTHING', [classId]);
+      let removed = 0;
+      if (replace) {
+        removed = (await db.query('DELETE FROM tests WHERE class_id = $1 AND subject = $2', [classId, subject])).rowCount;
+      }
+      let added = 0;
+      for (let i = 0; i < questions.length; i++) {
+        const q = questions[i] || {};
+        let t;
+        try {
+          t = parseTestBody({ question: q.text, correct_answer: q.correct, type: q.type, options: q.options, subject });
+        } catch (err) {
+          if (err instanceof HttpError) throw new HttpError(400, `${classId} ${subject}, ${i + 1}-savol: ${err.message}`);
+          throw err;
+        }
+        t.image_id = await saveTestImage(db, q.image);
+        t.sort_order = i + 1;
+        if (await insertTest(db, classId, t)) added++;
+      }
+      result.push({ class_id: classId, subject, added, removed });
+    }
+  });
+  res.json({ sets: result });
+}));
+
+// Sinfdagi takroriy savollarni o'chirish (har biridan eng birinchisi qoladi; fanlar alohida)
 app.post('/api/admin/classes/:id/dedup', asyncH(async (req, res) => {
   const r = await pool.query(`
     DELETE FROM tests WHERE class_id = $1 AND id NOT IN (
-      SELECT min(id) FROM tests WHERE class_id = $1 GROUP BY lower(btrim(question))
+      SELECT min(id) FROM tests WHERE class_id = $1 GROUP BY subject, lower(btrim(question))
     )`, [req.params.id]);
   res.json({ deleted: r.rowCount });
 }));
@@ -903,7 +1085,8 @@ app.post('/api/admin/classes/:id/copy-to-parallel', asyncH(async (req, res) => {
   const source = req.params.id;
   if (!source.includes('-')) throw new HttpError(400, 'Sinf nomi "7-A" ko\'rinishida bo\'lishi kerak');
   const grade = source.split('-')[0];
-  const { rows: tests } = await pool.query('SELECT question, correct_answer, options FROM tests WHERE class_id = $1', [source]);
+  const { rows: tests } = await pool.query(
+    'SELECT question, correct_answer, options, subject, qtype, image_id, sort_order FROM tests WHERE class_id = $1', [source]);
   if (!tests.length) throw new HttpError(400, 'Bu sinfda savol yo\'q');
   const { rows: all } = await pool.query('SELECT id FROM classes');
   const parallels = all.map(r => r.id).filter(id => id !== source && id.split('-')[0] === grade);
@@ -914,7 +1097,8 @@ app.post('/api/admin/classes/:id/copy-to-parallel', asyncH(async (req, res) => {
     for (const cls of parallels) {
       for (const t of tests) {
         const ok = await insertTest(db, cls, {
-          question: t.question, correct: t.correct_answer, options: JSON.stringify(uniqueOptions(t.options))
+          question: t.question, correct: t.correct_answer, options: JSON.stringify(uniqueOptions(t.options)),
+          subject: t.subject, qtype: t.qtype, image_id: t.image_id, sort_order: t.sort_order
         });
         if (ok) added++;
       }
@@ -925,9 +1109,17 @@ app.post('/api/admin/classes/:id/copy-to-parallel', asyncH(async (req, res) => {
 
 app.put('/api/admin/tests/:id', asyncH(async (req, res) => {
   const t = parseTestBody(req.body);
-  const r = await pool.query('UPDATE tests SET question = $2, correct_answer = $3, options = $4 WHERE id = $1',
-    [parseId(req.params.id), t.question, t.correct, t.options]);
-  if (!r.rowCount) throw new HttpError(404, 'Savol topilmadi');
+  const id = parseId(req.params.id);
+  await tx(async db => {
+    // image: undefined — o'zgarmaydi, null — o'chiriladi, data URL — yangisi
+    const imageChange = req.body?.image === undefined ? undefined : await saveTestImage(db, req.body.image);
+    const r = await db.query(`
+      UPDATE tests SET question = $2, correct_answer = $3, options = $4, qtype = $5, subject = $6,
+             image_id = CASE WHEN $7::boolean THEN $8::int ELSE image_id END
+      WHERE id = $1`,
+      [id, t.question, t.correct, t.options, t.qtype, t.subject, imageChange !== undefined, imageChange ?? null]);
+    if (!r.rowCount) throw new HttpError(404, 'Savol topilmadi');
+  });
   res.json({ success: true });
 }));
 
@@ -940,7 +1132,7 @@ app.delete('/api/admin/tests/:id', asyncH(async (req, res) => {
 app.get('/api/admin/attempts', asyncH(async (req, res) => {
   const classId = typeof req.query.class_id === 'string' && req.query.class_id ? req.query.class_id : null;
   const { rows } = await pool.query(`
-    SELECT a.id, a.class_id, a.student_name, a.team_name, a.status, a.score, a.total, a.violations,
+    SELECT a.id, a.class_id, a.subject, a.student_name, a.team_name, a.status, a.score, a.total, a.violations,
            a.current_index, cardinality(a.question_ids) AS question_count, a.camera,
            a.started_at, a.finished_at, a.last_seen_at,
            COALESCE((SELECT json_object_agg(type, n) FROM (
@@ -958,7 +1150,7 @@ app.get('/api/admin/attempts', asyncH(async (req, res) => {
 app.get('/api/admin/attempts/:id', asyncH(async (req, res) => {
   const id = parseId(req.params.id);
   const { rows } = await pool.query(`
-    SELECT id, class_id, student_name, team_name, status, score, total, violations, current_index,
+    SELECT id, class_id, subject, student_name, team_name, status, score, total, violations, current_index,
            cardinality(question_ids) AS question_count, camera, ip, user_agent,
            started_at, finished_at, last_seen_at
     FROM attempts WHERE id = $1`, [id]);
@@ -1027,7 +1219,7 @@ app.post('/api/admin/attempts/report', asyncH(async (req, res) => {
   const ids = parseIdList(req.body?.ids, 500);
   const [attempts, answers, events, snapshots] = await Promise.all([
     pool.query(`
-      SELECT id, class_id, student_name, team_name, status, score, total, violations, current_index,
+      SELECT id, class_id, subject, student_name, team_name, status, score, total, violations, current_index,
              cardinality(question_ids) AS question_count, camera, ip, user_agent, started_at, finished_at
       FROM attempts WHERE id = ANY($1::int[])`, [ids]),
     pool.query(`SELECT attempt_id, question, correct_answer, answer, is_correct, time_ms, timed_out
@@ -1066,7 +1258,7 @@ app.post('/api/admin/attempts/report', asyncH(async (req, res) => {
 // ─── Jonli kuzatuv ───
 app.get('/api/admin/live', asyncH(async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT a.id, a.class_id, a.student_name, a.current_index, cardinality(a.question_ids) AS question_count,
+    SELECT a.id, a.class_id, a.subject, a.student_name, a.current_index, cardinality(a.question_ids) AS question_count,
            a.violations, a.camera, a.started_at, a.last_seen_at, a.last_violation_at,
            (SELECT e.type FROM attempt_events e WHERE e.attempt_id = a.id AND e.is_violation
              ORDER BY e.id DESC LIMIT 1) AS last_violation_type,
