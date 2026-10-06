@@ -415,7 +415,7 @@ const SUPERSCRIPT = { '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '
 const UNIT_WORDS = [
   [/kilometr(?:lar)?/g, 'km'], [/santimetr/g, 'cm'], [/sm(?=\b|$)/g, 'cm'], [/metr(?:lar)?/g, 'm'],
   [/sekund(?:lar)?|soniya|sek/g, 's'], [/minut|daqiqa/g, 'min'], [/km\/s(?:oat)?$/g, 'km/soat'],
-  [/km\/h$/g, 'km/soat'], [/joul/g, 'j'], [/vatt/g, 'w'], [/nyuton/g, 'n'], [/amper/g, 'a'], [/volt/g, 'v'], [/om$/g, 'ω']
+  [/km\/h$/g, 'km/soat'], [/^m\/c$/g, 'm/s'], [/millimetr/g, 'mm'], [/^kilogramm?$/g, 'kg'], [/^gramm?$/g, 'g'], [/joul/g, 'j'], [/vatt/g, 'w'], [/nyuton/g, 'n'], [/amper/g, 'a'], [/volt/g, 'v'], [/om$/g, 'ω']
 ];
 
 function normalizeAnswer(s) {
@@ -430,15 +430,30 @@ function normalizeAnswer(s) {
   return t;
 }
 
+// Ma'lum birliklar: [kattalik, SI ga ko'paytuvchi] — "0,45 km" = "450 m", "36 km/soat" = "10 m/s"
+const UNIT_SI = {
+  mm: ['L', 0.001], cm: ['L', 0.01], dm: ['L', 0.1], m: ['L', 1], km: ['L', 1000],
+  s: ['T', 1], min: ['T', 60], soat: ['T', 3600], h: ['T', 3600],
+  'm/s': ['V', 1], 'km/soat': ['V', 1 / 3.6],
+  g: ['M', 0.001], kg: ['M', 1], t: ['M', 1000]
+};
+
 function splitNumber(s) {
-  const t = normalizeAnswer(s);
+  let t = normalizeAnswer(s);
+  if (t.includes('=')) t = t.slice(t.lastIndexOf('=') + 1);   // "v=300/30=10m/s" -> yakuniy natija "10m/s"
   const m = /^[^\d-]*?(-?\d+(?:\.\d+)?)(?:\*10\^?(-?\d+))?(.*)$/.exec(t);
   if (!m) return null;
   let value = Number(m[1]);
   if (m[2] !== undefined) value *= 10 ** Number(m[2]);
-  let unit = m[3].replace(/^[.:]+/, '').replace(/\(.*\)$/, '');
+  let unit = m[3].replace(/^[.:]+/, '').replace(/\(.*\)$/, '')
+    .replace(/[.!;]+$/, '')
+    .replace(/(?:ga)?(?:teng|bo'?ladi)?$/, '');                 // "10 m/s ga teng", "450 metr bo'ladi"
   for (const [re, rep] of UNIT_WORDS) unit = unit.replace(re, rep);
   return { value, unit };
+}
+
+function sameNumber(x, y) {
+  return Math.abs(x - y) <= Math.max(Math.abs(y) * 0.005, 1e-9);   // yaxlitlash uchun 0.5% farq
 }
 
 function isOpenAnswerCorrect(answer, correct) {
@@ -447,9 +462,10 @@ function isOpenAnswerCorrect(answer, correct) {
   const a = splitNumber(answer);
   const c = splitNumber(correct);
   if (!a || !c) return false;
-  const tol = Math.max(Math.abs(c.value) * 0.005, 1e-9);   // yaxlitlash uchun 0.5% farq
-  if (Math.abs(a.value - c.value) > tol) return false;
-  return !a.unit || !c.unit || a.unit === c.unit;
+  if (!a.unit || !c.unit) return sameNumber(a.value, c.value);
+  const ua = UNIT_SI[a.unit], uc = UNIT_SI[c.unit];
+  if (ua && uc) return ua[0] === uc[0] && sameNumber(a.value * ua[1], c.value * uc[1]);
+  return a.unit === c.unit && sameNumber(a.value, c.value);
 }
 
 function isAnswerCorrect(test, answer) {
